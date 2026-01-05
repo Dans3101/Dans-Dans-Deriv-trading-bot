@@ -1,4 +1,4 @@
-// src/bot/strategy.js
+// /bot/strategy.js
 
 /**
  * Calculate Exponential Moving Average (EMA)
