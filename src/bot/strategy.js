@@ -1,10 +1,7 @@
-// /bot/strategy.js
+// src/bot/strategy.js
 
 /**
  * Calculate Exponential Moving Average (EMA)
- * @param {number[]} values
- * @param {number} period
- * @returns {number|null}
  */
 function ema(values, period) {
   if (!Array.isArray(values) || values.length < period) {
@@ -22,12 +19,24 @@ function ema(values, period) {
 }
 
 /**
- * Decide trade direction using EMA 10 / EMA 20 crossover
- * @param {Array} candles
- * @returns {'CALL' | 'PUT' | null}
+ * Calculate simple trend direction from last 3 candles
+ */
+function shortTrend(candles) {
+  if (candles.length < 3) return null;
+
+  const last3 = candles.slice(-3).map(c => Number(c.close));
+
+  if (last3[2] > last3[1] && last3[1] > last3[0]) return 'UP';
+  if (last3[2] < last3[1] && last3[1] < last3[0]) return 'DOWN';
+
+  return 'FLAT';
+}
+
+/**
+ * Smarter trading decision
  */
 export function decideTradeDirection(candles) {
-  if (!Array.isArray(candles) || candles.length < 20) {
+  if (!Array.isArray(candles) || candles.length < 25) {
     return null;
   }
 
@@ -35,19 +44,24 @@ export function decideTradeDirection(candles) {
     .map(c => Number(c.close))
     .filter(v => !isNaN(v));
 
-  if (closes.length < 20) {
-    return null;
+  if (closes.length < 25) return null;
+
+  const ema10 = ema(closes.slice(-12), 10);
+  const ema20 = ema(closes.slice(-22), 20);
+
+  if (!ema10 || !ema20) return null;
+
+  const trend = shortTrend(candles);
+
+  // 🔹 CALL conditions
+  if (ema10 > ema20 && trend === 'UP') {
+    return 'CALL';
   }
 
-  const ema10 = ema(closes.slice(-10), 10);
-  const ema20 = ema(closes.slice(-20), 20);
-
-  if (ema10 === null || ema20 === null) {
-    return null;
+  // 🔹 PUT conditions
+  if (ema10 < ema20 && trend === 'DOWN') {
+    return 'PUT';
   }
 
-  if (ema10 > ema20) return 'CALL';
-  if (ema10 < ema20) return 'PUT';
-
-  return null;
+  return null; // No trade
 }
