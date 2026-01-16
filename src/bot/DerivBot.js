@@ -2,7 +2,7 @@ import WebSocket from 'ws';
 import { DERIV_WS } from '../config/deriv.js';
 import { calculateStake, checkLimits } from './riskManager.js';
 import { decideTradeDirection } from './strategy.js';
-import { sendTelegram } from '../notifications/telegram.js';
+import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
 
 export class DerivBot {
@@ -11,6 +11,7 @@ export class DerivBot {
 
     this.candles = [];
     this.currentContractId = null;
+    this.fetchingCandles = false;
 
     this.user.active = false;
     this.user.inTrade = false;
@@ -28,26 +29,34 @@ export class DerivBot {
 
     this.user.ws.on('open', () => {
       console.log(`[${this.user.userId}] Connected to Deriv`);
+      sendTelegramMessage(`✅ Bot connected for ${this.user.userId}`);
       this.authorize();
     });
 
     this.user.ws.on('message', (msg) => {
-      this.handleMessage(JSON.parse(msg));
+      try {
+        this.handleMessage(JSON.parse(msg));
+      } catch (err) {
+        console.error("JSON parse error:", err);
+      }
     });
 
     this.user.ws.on('close', () => {
       console.log(`[${this.user.userId}] Connection closed`);
       this.user.active = false;
-      sendTelegram(`🛑 Bot stopped for ${this.user.userId}`);
+      sendTelegramMessage(`🛑 Bot stopped for ${this.user.userId}`);
     });
 
     this.user.ws.on('error', (err) => {
       console.error(`[${this.user.userId}] WS Error`, err.message);
+      sendTelegramMessage(`⚠️ WebSocket error for ${this.user.userId}`);
     });
   }
 
   send(data) {
-    this.user.ws.send(JSON.stringify(data));
+    if (this.user.ws && this.user.ws.readyState === WebSocket.OPEN) {
+      this.user.ws.send(JSON.stringify(data));
+    }
   }
 
   authorize() {
@@ -59,7 +68,7 @@ export class DerivBot {
   handleMessage(data) {
     switch (data.msg_type) {
       case 'authorize':
-        sendTelegram(`🤖 Bot started for ${this.user.userId}`);
+        sendTelegramMessage(`🤖 Bot authorized for ${this.user.userId}`);
         this.subscribeBalance();
         this.getCandles();
         break;
@@ -70,6 +79,7 @@ export class DerivBot {
 
       case 'candles':
         this.candles = data.candles;
+        this.fetchingCandles = false;
         this.tryTrade();
         break;
 
@@ -80,6 +90,10 @@ export class DerivBot {
 
       case 'proposal_open_contract':
         this.handleContractUpdate(data.proposal_open_contract);
+        break;
+
+      default:
+        // Ignore other messages
         break;
     }
   }
@@ -108,6 +122,10 @@ export class DerivBot {
   /* ================= CANDLES ================= */
 
   getCandles() {
+    if (this.fetchingCandles) return;
+
+    this.fetchingCandles = true;
+
     this.send({
       ticks_history: this.user.market,
       style: 'candles',
@@ -124,7 +142,7 @@ export class DerivBot {
 
     // Performance fee enforcement
     if (!canTrade(this.user)) {
-      sendTelegram(
+      sendTelegramMessage(
         `💰 Performance fee unpaid. Bot locked for ${this.user.userId}`
       );
       this.user.ws.close();
@@ -134,13 +152,19 @@ export class DerivBot {
     // Risk & daily limits
     const status = checkLimits(this.user);
     if (status !== 'OK') {
-      sendTelegram(`🛑 Bot stopped for ${this.user.userId} – ${status}`);
+      sendTelegramMessage(
+        `🛑 Bot stopped for ${this.user.userId} – ${status}`
+      );
       this.user.ws.close();
       return;
     }
 
     const direction = decideTradeDirection(this.candles);
-    if (!direction) return;
+    if (!direction) {
+      // Request fresh candles and wait
+      setTimeout(() => this.getCandles(), 2000);
+      return;
+    }
 
     const stake = calculateStake(this.user.currentBalance);
 
@@ -149,6 +173,10 @@ export class DerivBot {
 
     console.log(
       `[${this.user.userId}] ${direction} | Stake $${stake.toFixed(2)}`
+    );
+
+    sendTelegramMessage(
+      `🚀 Trade Opened: ${direction}\nStake: $${stake.toFixed(2)}`
     );
 
     this.send({
@@ -186,17 +214,17 @@ export class DerivBot {
     this.user.inTrade = false;
     this.currentContractId = null;
 
-    const result = profit >= 0 ? 'WIN' : 'LOSS';
+    const result = profit >= 0 ? 'WIN ✅' : 'LOSS ❌';
 
     console.log(
       `[${this.user.userId}] ${result} | Profit: ${profit}`
     );
 
-    sendTelegram(
+    sendTelegramMessage(
       `📊 ${this.user.userId} ${result}\nProfit: ${profit.toFixed(2)}`
     );
 
-    // Small delay before next cycle
+    // Wait then request new candles
     setTimeout(() => this.getCandles(), 3000);
   }
 }
