@@ -1,5 +1,8 @@
 import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
 import express from 'express';
+import { fileURLToPath } from 'url';
 import { UserSession } from './users/userSession.js';
 import { DerivBot } from './bot/DerivBot.js';
 
@@ -24,86 +27,69 @@ if (!process.env.DERIV_API_TOKEN) {
   process.exit(1);
 }
 
-/* ================= MULTI-USER BOT MANAGER ================= */
+/* ================= LOAD USERS FROM JSON ================= */
 
-class BotManager {
-  constructor() {
-    this.bots = new Map(); // userId -> DerivBot
-  }
+// Fix for ES modules path handling
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-  addUser(userData) {
-    if (this.bots.has(userData.userId)) {
-      console.log(`⚠️ Bot already exists for ${userData.userId}`);
-      return;
-    }
+const usersFilePath = path.join(__dirname, '../users.json');
 
-    const session = new UserSession(userData);
-    const bot = new DerivBot(session);
+let usersData;
 
-    this.bots.set(userData.userId, bot);
-    console.log(`➕ Registered bot for ${userData.userId}`);
-  }
-
-  startBot(userId) {
-    const bot = this.bots.get(userId);
-    if (!bot) {
-      console.log(`❌ No bot found for ${userId}`);
-      return;
-    }
-
-    bot.connect();
-    console.log(`▶️ Started bot for ${userId}`);
-  }
-
-  stopBot(userId) {
-    const bot = this.bots.get(userId);
-    if (!bot) return;
-
-    if (bot.user.ws) bot.user.ws.close();
-    this.bots.delete(userId);
-    console.log(`🛑 Stopped bot for ${userId}`);
-  }
-
-  startAll() {
-    for (const userId of this.bots.keys()) {
-      this.startBot(userId);
-    }
-  }
-
-  listUsers() {
-    return Array.from(this.bots.keys());
-  }
+try {
+  const raw = fs.readFileSync(usersFilePath, 'utf8');
+  usersData = JSON.parse(raw);
+} catch (err) {
+  console.error('❌ Failed to load users.json:', err.message);
+  process.exit(1);
 }
 
-/* ================= USERS CONFIG ================= */
+const users = (usersData.users || []).filter(u => u.active);
 
-const users = [
-  {
-    userId: 'user_001',
-    apiToken: process.env.DERIV_API_TOKEN,
-    market: 'R_75'
-  },
+if (users.length === 0) {
+  console.error('❌ No active users found in users.json');
+  process.exit(1);
+}
 
-  // 👇 You can add more users later like this:
-  /*
-  {
-    userId: 'user_002',
-    apiToken: process.env.DERIV_API_TOKEN_2,
-    market: 'R_100'
-  }
-  */
-];
+console.log(`📂 Loaded ${users.length} active user(s) from users.json`);
 
 /* ================= BOT STARTUP ================= */
 
-const botManager = new BotManager();
+function startBots() {
+  users.forEach(userData => {
+    try {
+      // Replace "ENV:XXX" token placeholders with real env values
+      const apiToken =
+        typeof userData.apiToken === 'string' &&
+        userData.apiToken.startsWith('ENV:')
+          ? process.env[userData.apiToken.replace('ENV:', '')]
+          : userData.apiToken;
 
-// Register all users
-users.forEach(userData => botManager.addUser(userData));
+      if (!apiToken) {
+        console.error(
+          `❌ Missing API token for ${userData.userId}. Check users.json or env vars`
+        );
+        return;
+      }
 
-// Start all bots after Render boots
-setTimeout(() => {
-  console.log("🚀 Starting all bots...");
-  botManager.startAll();
-  console.log("👥 Active bots:", botManager.listUsers());
-}, 3000);
+      const session = new UserSession({
+        ...userData,
+        apiToken
+      });
+
+      const bot = new DerivBot(session);
+      bot.connect();
+
+      console.log(`✅ Bot started for ${userData.userId}`);
+    } catch (err) {
+      console.error(
+        `❌ Failed to start bot for ${userData.userId}:`,
+        err.message
+      );
+    }
+  });
+}
+
+// Delay bot start slightly so Render server initializes first
+setTimeout(startBots, 3000);
