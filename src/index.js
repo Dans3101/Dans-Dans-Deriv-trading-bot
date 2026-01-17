@@ -15,9 +15,7 @@ app.get('/', (req, res) => {
   res.send('✅ Deriv trading bot is running on Render');
 });
 
-app.listen(PORT, () => {
-  console.log(`🌐 Web server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 
 /* ================= ENV CHECK ================= */
 if (!process.env.DERIV_API_TOKEN) {
@@ -50,15 +48,14 @@ console.log(`📂 Loaded ${users.length} active user(s) from users.json`);
 /* ================= BOT STORAGE ================= */
 export const bots = new Map(); // userId → DerivBot instance
 
-/* ================= BOT STARTUP ================= */
+/* ================= START BOTS ================= */
 async function startBots() {
   console.log('🚀 Starting Deriv bots...');
 
   for (const userData of users) {
     try {
       const apiToken =
-        typeof userData.apiToken === 'string' &&
-        userData.apiToken.startsWith('ENV:')
+        userData.apiToken?.startsWith('ENV:')
           ? process.env[userData.apiToken.replace('ENV:', '')]
           : userData.apiToken;
 
@@ -69,27 +66,21 @@ async function startBots() {
 
       const session = new UserSession({ ...userData, apiToken });
       const bot = new DerivBot(session);
-      bot.connect(); // Do NOT await — keep WebSocket async
+      await bot.connect();
+
       bots.set(userData.userId, bot);
-
       console.log(`✅ Bot started for ${userData.userId}`);
-
-      // Small delay between bot startups to reduce Telegram message collisions
-      await new Promise(r => setTimeout(r, 500));
     } catch (err) {
       console.error(`❌ Failed to start bot for ${userData.userId}:`, err.message);
     }
   }
 
-  // ======== START TELEGRAM ADMIN ONLY ONCE ========
+  // Start Telegram admin **once**
   if (!global.telegramStarted) {
     global.telegramStarted = true;
     console.log('🤖 Starting Telegram Admin...');
     listenTelegramAdmin(bots);
-  } else {
-    console.log('ℹ️ Telegram already running — skipping duplicate start.');
   }
 }
 
-// Delay to ensure Render web server is fully up
 setTimeout(startBots, 5000);
