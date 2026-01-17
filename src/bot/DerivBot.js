@@ -4,6 +4,7 @@ import { calculateStake, checkLimits } from './riskManager.js';
 import { decideTradeDirection } from './strategy.js';
 import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
+import { logTrade } from '../utils/tradeLogger.js';   // ✅ ADDED
 
 export class DerivBot {
   constructor(user) {
@@ -93,7 +94,6 @@ export class DerivBot {
         break;
 
       default:
-        // Ignore other messages
         break;
     }
   }
@@ -161,7 +161,6 @@ export class DerivBot {
 
     const direction = decideTradeDirection(this.candles);
     if (!direction) {
-      // Request fresh candles and wait
       setTimeout(() => this.getCandles(), 2000);
       return;
     }
@@ -214,7 +213,7 @@ export class DerivBot {
     this.user.inTrade = false;
     this.currentContractId = null;
 
-    const result = profit >= 0 ? 'WIN ✅' : 'LOSS ❌';
+    const result = profit >= 0 ? 'WIN' : 'LOSS';
 
     console.log(
       `[${this.user.userId}] ${result} | Profit: ${profit}`
@@ -223,6 +222,16 @@ export class DerivBot {
     sendTelegramMessage(
       `📊 ${this.user.userId} ${result}\nProfit: ${profit.toFixed(2)}`
     );
+
+    // ✅ LOG TRADE TO FILE
+    logTrade({
+      userId: this.user.userId,
+      market: this.user.market,
+      direction: result,
+      stake: contract.buy_price || 0,
+      profit: profit,
+      balance: this.user.currentBalance
+    });
 
     // Wait then request new candles
     setTimeout(() => this.getCandles(), 3000);
