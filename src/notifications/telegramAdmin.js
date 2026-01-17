@@ -1,203 +1,73 @@
+// src/notifications/telegramAdmin.js
 import TelegramBot from 'node-telegram-bot-api';
 
-let bot = null;
-let botsRegistry = {}; // Stores all active bots
+/* ================= TELEGRAM ADMIN CONFIG ================= */
+const TELEGRAM_TOKEN = process.env.TELEGRAM_ADMIN_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID;
 
-export function registerBot(userId, botInstance) {
-  botsRegistry[userId] = botInstance;
+if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+  console.warn('⚠️ Telegram admin bot not configured. Set TELEGRAM_ADMIN_TOKEN & TELEGRAM_ADMIN_CHAT_ID in env');
 }
 
-export function removeBot(userId) {
-  delete botsRegistry[userId];
-}
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-export function startTelegramAdmin() {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const adminChat = process.env.TELEGRAM_CHAT_ID;
+/**
+ * Listen for admin commands and control multi-user bots
+ * @param {Array} bots - Array of DerivBot instances
+ */
+export function listenTelegramAdmin(bots) {
+  bot.on('message', async (msg) => {
+    // Only allow commands from admin chat
+    if (msg.chat.id.toString() !== TELEGRAM_CHAT_ID) return;
 
-  if (!token || !adminChat) {
-    console.warn('⚠️ Telegram admin not configured');
-    return;
-  }
+    const text = msg.text?.trim().toLowerCase();
+    if (!text) return;
 
-  bot = new TelegramBot(token, { polling: true });
-  console.log('🤖 Telegram admin bot started...');
-
-  // ======= STATUS =======
-  bot.onText(/\/status/, msg => {
-    const chatId = msg.chat.id;
-
-    let report = "📊 *BOT STATUS REPORT*\n\n";
-
-    Object.keys(botsRegistry).forEach(id => {
-      const b = botsRegistry[id].user;
-      report += `👤 ${id}\n`;
-      report += `• Active: ${b.active}\n`;
-      report += `• In Trade: ${b.inTrade}\n`;
-      report += `• Balance: $${b.currentBalance.toFixed(2)}\n`;
-      report += `• Trades Today: ${b.tradesToday}\n\n`;
-    });
-
-    bot.sendMessage(chatId, report, { parse_mode: "Markdown" });
-  });
-
-  // ======= STOP BOT =======
-  bot.onText(/\/stop (.+)/, (msg, match) => {
-    const chatId = msg.chat.id;
-    const userId = match[1];
-
-    const botInstance = botsRegistry[userId];
-    if (!botInstance) {
-      bot.sendMessage(chatId, `❌ No bot found for ${userId}`);
-      return;
+    // ================= ADMIN COMMANDS =================
+    if (text === '/status') {
+      // Show status of all bots
+      bots.forEach(userBot => {
+        const u = userBot.user;
+        bot.sendMessage(
+          TELEGRAM_CHAT_ID,
+          `${u.userId} | Balance: $${u.currentBalance.toFixed(2)} | Trades Today: ${u.tradesToday} | Active: ${u.active}`
+        );
+      });
     }
 
-    botInstance.user.ws.close();
-    bot.sendMessage(chatId, `🛑 Bot stopped for ${userId}`);
-  });
-
-  // ======= START BOT =======
-  bot.onText(/\/start (.+)/, (msg, match) => {
-    const chatId = msg.chat.id;
-    const userId = match[1];
-
-    const botInstance = botsRegistry[userId];
-    if (!botInstance) {
-      bot.sendMessage(chatId, `❌ No bot found for ${userId}`);
-      return;
+    if (text.startsWith('/stop')) {
+      const userId = text.split(' ')[1];
+      const targetBot = bots.find(b => b.user.userId === userId);
+      if (targetBot) {
+        if (targetBot.user.active && targetBot.user.ws) {
+          targetBot.user.ws.close();
+        }
+        bot.sendMessage(TELEGRAM_CHAT_ID, `🛑 Bot stopped for ${userId}`);
+      } else {
+        bot.sendMessage(TELEGRAM_CHAT_ID, `❌ Bot with userId "${userId}" not found`);
+      }
     }
 
-    botInstance.connect();
-    bot.sendMessage(chatId, `▶️ Bot restarted for ${userId}`);
-  });
-
-  // ======= BALANCES =======
-  bot.onText(/\/balances/, msg => {
-    const chatId = msg.chat.id;
-
-    let report = "💰 *BALANCES*\n\n";
-
-    Object.keys(botsRegistry).forEach(id => {
-      const b = botsRegistry[id].user;
-      report += `• ${id}: $${b.currentBalance.toFixed(2)}\n`;
-    });
-
-    bot.sendMessage(chatId, report, { parse_mode: "Markdown" });
-  });
-
-  // ======= TRADES TODAY =======
-  bot.onText(/\/trades/, msg => {
-    const chatId = msg.chat.id;
-
-    let report = "📈 *TRADES TODAY*\n\n";
-
-    Object.keys(botsRegistry).forEach(id => {
-      const b = botsRegistry[id].user;
-      report += `• ${id}: ${b.tradesToday} trades\n`;
-    });
-
-    bot.sendMessage(chatId, report, { parse_mode: "Markdown" });
-  });
-
-  // ======= SET RISK =======
-  bot.onText(/\/setrisk (.+) (.+)/, (msg, match) => {
-    const chatId = msg.chat.id;
-    const newRisk = parseFloat(match[1]);
-    const userId = match[2];
-
-    const botInstance = botsRegistry[userId];
-    if (!botInstance) {
-      bot.sendMessage(chatId, `❌ No bot found for ${userId}`);
-      return;
+    if (text.startsWith('/start')) {
+      const userId = text.split(' ')[1];
+      const targetBot = bots.find(b => b.user.userId === userId);
+      if (targetBot) {
+        if (!targetBot.user.active) {
+          targetBot.connect();
+          bot.sendMessage(TELEGRAM_CHAT_ID, `✅ Bot started for ${userId}`);
+        } else {
+          bot.sendMessage(TELEGRAM_CHAT_ID, `ℹ️ Bot already running for ${userId}`);
+        }
+      } else {
+        bot.sendMessage(TELEGRAM_CHAT_ID, `❌ Bot with userId "${userId}" not found`);
+      }
     }
 
-    botInstance.user.riskPercent = newRisk;
-
-    bot.sendMessage(
-      chatId,
-      `🎯 Risk updated for ${userId} → ${newRisk * 100}%`
-    );
-  });
-
-  // ======= CHANGE MARKET =======
-  bot.onText(/\/changemarket (.+) (.+)/, (msg, match) => {
-    const chatId = msg.chat.id;
-    const newMarket = match[1];
-    const userId = match[2];
-
-    const botInstance = botsRegistry[userId];
-    if (!botInstance) {
-      bot.sendMessage(chatId, `❌ No bot found for ${userId}`);
-      return;
+    if (text === '/help') {
+      bot.sendMessage(
+        TELEGRAM_CHAT_ID,
+        `📌 Admin Commands:\n/status - Show bot status\n/start <userId> - Start bot\n/stop <userId> - Stop bot`
+      );
     }
-
-    botInstance.user.market = newMarket;
-
-    bot.sendMessage(
-      chatId,
-      `📊 Market changed for ${userId} → ${newMarket}`
-    );
-  });
-
-  // ======= RESET DAILY TRADES =======
-  bot.onText(/\/resetday (.+)/, (msg, match) => {
-    const chatId = msg.chat.id;
-    const userId = match[1];
-
-    const botInstance = botsRegistry[userId];
-    if (!botInstance) {
-      bot.sendMessage(chatId, `❌ No bot found for ${userId}`);
-      return;
-    }
-
-    botInstance.user.tradesToday = 0;
-
-    bot.sendMessage(chatId, `🔄 Daily trades reset for ${userId}`);
-  });
-
-  // ======= TODAY PROFIT =======
-  bot.onText(/\/profit today/, msg => {
-    const chatId = msg.chat.id;
-
-    let report = "📈 *TODAY'S PROFIT/LOSS*\n\n";
-
-    Object.keys(botsRegistry).forEach(id => {
-      const b = botsRegistry[id].user;
-      const profit = b.currentBalance - b.startBalance;
-
-      report += `• ${id}: $${profit.toFixed(2)}\n`;
-    });
-
-    bot.sendMessage(chatId, report, { parse_mode: "Markdown" });
-  });
-
-  // ======= LOCK BOT =======
-  bot.onText(/\/lock (.+)/, (msg, match) => {
-    const chatId = msg.chat.id;
-    const userId = match[1];
-
-    const botInstance = botsRegistry[userId];
-    if (!botInstance) {
-      bot.sendMessage(chatId, `❌ No bot found for ${userId}`);
-      return;
-    }
-
-    botInstance.user.locked = true;
-    bot.sendMessage(chatId, `🔒 Bot locked for ${userId}`);
-  });
-
-  // ======= UNLOCK BOT =======
-  bot.onText(/\/unlock (.+)/, (msg, match) => {
-    const chatId = msg.chat.id;
-    const userId = match[1];
-
-    const botInstance = botsRegistry[userId];
-    if (!botInstance) {
-      bot.sendMessage(chatId, `❌ No bot found for ${userId}`);
-      return;
-    }
-
-    botInstance.user.locked = false;
-    bot.sendMessage(chatId, `🔓 Bot unlocked for ${userId}`);
   });
 }
