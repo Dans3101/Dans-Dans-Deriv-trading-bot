@@ -4,7 +4,7 @@ import { calculateStake, checkLimits } from './riskManager.js';
 import { decideTradeDirection } from './strategy.js';
 import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
-import { logTrade } from '../utils/tradeLogger.js';   // ✅ ADDED
+import { logTrade } from '../utils/tradeLogger.js';
 
 export class DerivBot {
   constructor(user) {
@@ -13,6 +13,7 @@ export class DerivBot {
     this.candles = [];
     this.currentContractId = null;
     this.fetchingCandles = false;
+    this.connected = false;
 
     this.user.active = false;
     this.user.inTrade = false;
@@ -25,10 +26,16 @@ export class DerivBot {
   /* ================= CONNECTION ================= */
 
   connect() {
+    if (!this.user.apiToken) {
+      console.error(`[${this.user.userId}] ❌ Missing API token`);
+      return;
+    }
+
     const appId = process.env.DERIV_APP_ID || 1089;
     this.user.ws = new WebSocket(DERIV_WS(appId));
 
     this.user.ws.on('open', () => {
+      this.connected = true;
       console.log(`[${this.user.userId}] Connected to Deriv`);
       sendTelegramMessage(`✅ Bot connected for ${this.user.userId}`);
       this.authorize();
@@ -38,20 +45,28 @@ export class DerivBot {
       try {
         this.handleMessage(JSON.parse(msg));
       } catch (err) {
-        console.error("JSON parse error:", err);
+        console.error(`[${this.user.userId}] JSON parse error:`, err);
       }
     });
 
     this.user.ws.on('close', () => {
+      this.connected = false;
       console.log(`[${this.user.userId}] Connection closed`);
-      this.user.active = false;
       sendTelegramMessage(`🛑 Bot stopped for ${this.user.userId}`);
+      this.user.active = false;
+      this.user.inTrade = false;
     });
 
     this.user.ws.on('error', (err) => {
-      console.error(`[${this.user.userId}] WS Error`, err.message);
+      console.error(`[${this.user.userId}] WS Error:`, err.message);
       sendTelegramMessage(`⚠️ WebSocket error for ${this.user.userId}`);
     });
+  }
+
+  disconnect() {
+    if (this.user.ws && this.connected) {
+      this.user.ws.close();
+    }
   }
 
   send(data) {
@@ -105,13 +120,8 @@ export class DerivBot {
       this.user.startBalance = balance;
       this.user.maxBalance = balance;
     }
-
     this.user.currentBalance = balance;
-
-    if (balance > this.user.maxBalance) {
-      this.user.maxBalance = balance;
-    }
-
+    if (balance > this.user.maxBalance) this.user.maxBalance = balance;
     this.user.active = true;
   }
 
@@ -123,7 +133,6 @@ export class DerivBot {
 
   getCandles() {
     if (this.fetchingCandles) return;
-
     this.fetchingCandles = true;
 
     this.send({
@@ -137,25 +146,20 @@ export class DerivBot {
   /* ================= TRADING LOGIC ================= */
 
   tryTrade() {
-    if (!this.user.active) return;
-    if (this.user.inTrade) return;
+    if (!this.user.active || this.user.inTrade) return;
 
-    // Performance fee enforcement
     if (!canTrade(this.user)) {
       sendTelegramMessage(
         `💰 Performance fee unpaid. Bot locked for ${this.user.userId}`
       );
-      this.user.ws.close();
+      this.disconnect();
       return;
     }
 
-    // Risk & daily limits
     const status = checkLimits(this.user);
     if (status !== 'OK') {
-      sendTelegramMessage(
-        `🛑 Bot stopped for ${this.user.userId} – ${status}`
-      );
-      this.user.ws.close();
+      sendTelegramMessage(`🛑 Bot stopped for ${this.user.userId} – ${status}`);
+      this.disconnect();
       return;
     }
 
@@ -166,17 +170,12 @@ export class DerivBot {
     }
 
     const stake = calculateStake(this.user.currentBalance);
-
     this.user.inTrade = true;
     this.user.tradesToday++;
 
-    console.log(
-      `[${this.user.userId}] ${direction} | Stake $${stake.toFixed(2)}`
-    );
+    console.log(`[${this.user.userId}] ${direction} | Stake $${stake.toFixed(2)}`);
 
-    sendTelegramMessage(
-      `🚀 Trade Opened: ${direction}\nStake: $${stake.toFixed(2)}`
-    );
+    sendTelegramMessage(`🚀 Trade Opened: ${direction}\nStake: $${stake.toFixed(2)}`);
 
     this.send({
       buy: 1,
@@ -197,7 +196,6 @@ export class DerivBot {
 
   subscribeContract() {
     if (!this.currentContractId) return;
-
     this.send({
       proposal_open_contract: 1,
       contract_id: this.currentContractId,
@@ -209,31 +207,52 @@ export class DerivBot {
     if (!contract.is_sold) return;
 
     const profit = Number(contract.profit);
-
     this.user.inTrade = false;
     this.currentContractId = null;
 
-    const result = profit >= 0 ? 'WIN' : 'LOSS';
+    const result = profit >= 0 ? 'WIN ✅' : 'LOSS ❌';
 
-    console.log(
-      `[${this.user.userId}] ${result} | Profit: ${profit}`
-    );
+    console.log(`[${this.user.userId}] ${result} | Profit: ${profit}`);
+    sendTelegramMessage(`📊 ${this.user.userId} ${result}\nProfit: ${profit.toFixed(2)}`);
 
-    sendTelegramMessage(
-      `📊 ${this.user.userId} ${result}\nProfit: ${profit.toFixed(2)}`
-    );
-
-    // ✅ LOG TRADE TO FILE
+    // Log trade
     logTrade({
       userId: this.user.userId,
       market: this.user.market,
       direction: result,
       stake: contract.buy_price || 0,
-      profit: profit,
+      profit,
       balance: this.user.currentBalance
     });
 
-    // Wait then request new candles
     setTimeout(() => this.getCandles(), 3000);
+  }
+
+  /* ================= ADMIN COMMAND METHODS ================= */
+
+  start() {
+    if (this.connected) {
+      sendTelegramMessage(`ℹ️ Bot for ${this.user.userId} already running`);
+      return;
+    }
+    this.connect();
+  }
+
+  stop() {
+    if (!this.connected) {
+      sendTelegramMessage(`ℹ️ Bot for ${this.user.userId} already stopped`);
+      return;
+    }
+    this.disconnect();
+  }
+
+  status() {
+    return {
+      userId: this.user.userId,
+      active: this.user.active,
+      inTrade: this.user.inTrade,
+      currentBalance: this.user.currentBalance,
+      tradesToday: this.user.tradesToday
+    };
   }
 }
