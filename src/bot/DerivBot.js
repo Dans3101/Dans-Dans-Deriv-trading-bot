@@ -36,7 +36,7 @@ export class DerivBot {
 
     this.user.ws.on('open', () => {
       console.log(`[${this.user.userId}] Connected to Deriv`);
-      this.safeTelegram(`✅ Bot connected for ${this.user.userId}`);
+      this.safeTelegram(`✅ Bot connected for <b>${this.user.userId}</b>`);
       this.authorize();
       this.startHeartbeat();
     });
@@ -52,14 +52,14 @@ export class DerivBot {
     this.user.ws.on('close', (code) => {
       console.log(`[${this.user.userId}] Connection closed (code: ${code})`);
       this.user.active = false;
-      this.safeTelegram(`🛑 Bot disconnected for ${this.user.userId}`);
+      this.safeTelegram(`🛑 Bot disconnected for <b>${this.user.userId}</b>`);
       this.stopHeartbeat();
       this.scheduleReconnect();
     });
 
     this.user.ws.on('error', (err) => {
       console.error(`[${this.user.userId}] WS Error:`, err.message);
-      this.safeTelegram(`⚠️ WebSocket error for ${this.user.userId}`);
+      this.safeTelegram(`⚠️ WebSocket error for <b>${this.user.userId}</b>`);
       this.user.ws.close();
     });
   }
@@ -112,7 +112,12 @@ export class DerivBot {
     const now = Date.now();
     if (now - this.lastTelegramSent < this.telegramInterval) return;
     this.lastTelegramSent = now;
-    sendTelegramMessage(message, silent);
+
+    // Use HTML parsing to avoid "can't parse entities"
+    sendTelegramMessage(
+      message.replace(/[_*[\]()~`>#+-=|{}.!]/g, '\\$&'),
+      process.env.TELEGRAM_ADMIN_CHAT_ID
+    );
   }
 
   /* ================= MESSAGE HANDLER ================= */
@@ -255,9 +260,7 @@ export class DerivBot {
 
     console.log(`[${this.user.userId}] ${result} | Profit: ${profit}`);
 
-    this.safeTelegram(
-      `📊 <b>${this.user.userId}</b> ${result}\nProfit: ${profit.toFixed(2)}`
-    );
+    this.safeTelegram(`📊 <b>${this.user.userId}</b> ${result}\nProfit: ${profit.toFixed(2)}`);
 
     logTrade({
       userId: this.user.userId,
