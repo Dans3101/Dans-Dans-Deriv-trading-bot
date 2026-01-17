@@ -56,7 +56,6 @@ console.log(`📂 Loaded ${users.length} active user(s) from users.json`);
 
 /* ================= BOT STORAGE (SINGLE SOURCE OF TRUTH) ================= */
 
-// ✅ SINGLE GLOBAL MAP — NO DUPLICATES
 export const bots = new Map(); // userId → DerivBot instance
 
 /* ================= BOT STARTUP ================= */
@@ -87,7 +86,7 @@ async function startBots() {
       const bot = new DerivBot(session);
       await bot.connect();
 
-      // ✅ STORE BOT FOR TELEGRAM ADMIN
+      // Store bot for Telegram admin
       bots.set(userData.userId, bot);
 
       console.log(`✅ Bot started for ${userData.userId}`);
@@ -99,10 +98,15 @@ async function startBots() {
     }
   }
 
-  // ✅ START TELEGRAM ADMIN **ONCE**
-  console.log('🤖 Starting Telegram Admin...');
-  listenTelegramAdmin(bots);
+  // ======== CRITICAL FIX: start Telegram ONLY ONCE ========
+  if (!global.telegramStarted) {
+    global.telegramStarted = true;
+    console.log('🤖 Starting Telegram Admin...');
+    listenTelegramAdmin(bots);
+  } else {
+    console.log('ℹ️ Telegram already running — skipping duplicate start.');
+  }
 }
 
-// Small delay so Render server initializes first
-setTimeout(startBots, 3000);
+// Longer delay for Render stability
+setTimeout(startBots, 5000);
