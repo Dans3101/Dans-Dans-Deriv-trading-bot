@@ -7,22 +7,6 @@ import { UserSession } from './users/userSession.js';
 import { DerivBot } from './bot/DerivBot.js';
 import { listenTelegramAdmin } from './notifications/telegramAdmin.js';
 
-const bots = [];
-users.forEach(userData => {
-  const apiToken =
-    userData.apiToken.startsWith('ENV:')
-      ? process.env[userData.apiToken.replace('ENV:', '')]
-      : userData.apiToken;
-
-  const session = new UserSession({ ...userData, apiToken });
-  const bot = new DerivBot(session);
-  bot.connect();
-  bots.push(bot);
-});
-
-// Start listening for admin commands
-listenTelegramAdmin(bots);
-
 /* ================= RENDER KEEP-ALIVE SERVER ================= */
 
 const app = express();
@@ -48,6 +32,7 @@ if (!process.env.DERIV_API_TOKEN) {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
 const usersFilePath = path.join(__dirname, '../users.json');
 
 let usersData;
@@ -69,9 +54,12 @@ if (users.length === 0) {
 
 console.log(`📂 Loaded ${users.length} active user(s) from users.json`);
 
-/* ================= BOT STARTUP ================= */
+/* ================= BOT STORAGE (FIXED) ================= */
 
-export const bots = new Map(); // Key: userId, Value: DerivBot instance
+// ✅ ONE SINGLE DECLARATION — NO DUPLICATES
+export const bots = new Map(); // userId → DerivBot instance
+
+/* ================= BOT STARTUP ================= */
 
 function startBots() {
   users.forEach(userData => {
@@ -97,7 +85,8 @@ function startBots() {
       const bot = new DerivBot(session);
       bot.connect();
 
-      bots.set(userData.userId, bot); // ✅ store instance for admin commands
+      // ✅ STORE BOT IN MAP FOR TELEGRAM ADMIN
+      bots.set(userData.userId, bot);
 
       console.log(`✅ Bot started for ${userData.userId}`);
     } catch (err) {
@@ -107,11 +96,10 @@ function startBots() {
       );
     }
   });
+
+  // ✅ START TELEGRAM ADMIN AFTER BOTS ARE READY
+  listenTelegramAdmin(bots);
 }
 
-// Delay bot start slightly so Render server initializes first
+// Delay so Render server starts first
 setTimeout(startBots, 3000);
-
-/* ================= TELEGRAM ADMIN COMMANDS ================= */
-
-listenTelegramAdmin(bots); // listens for commands like /stop user_001, /status, /start all
