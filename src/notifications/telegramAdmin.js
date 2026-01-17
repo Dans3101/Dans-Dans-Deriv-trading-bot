@@ -5,19 +5,36 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 let bot = null;
-let isListening = false; // <-- prevents duplicate polling
+let isListening = false;
 
-if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
-  console.warn(
-    '⚠️ Telegram admin bot NOT configured.\n' +
-    'Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in Render.'
-  );
-} else {
+export function startTelegramBot() {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.warn(
+      '⚠️ Telegram bot not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.'
+    );
+    return null;
+  }
+
+  if (bot) {
+    console.log('ℹ️ Telegram bot already running — skipping.');
+    return bot;
+  }
+
   try {
-    bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-    console.log('✅ Telegram Admin Bot connected.');
+    bot = new TelegramBot(TELEGRAM_TOKEN, {
+      polling: {
+        interval: 3000,      // slower polling = fewer errors
+        autoStart: true,
+        dropPendingUpdates: true // prevents conflicts
+      }
+    });
+
+    console.log('✅ Telegram Admin Bot started.');
+    return bot;
   } catch (err) {
     console.error('❌ Failed to start Telegram bot:', err.message);
+    bot = null;
+    return null;
   }
 }
 
@@ -26,14 +43,11 @@ if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
  * @param {Map} bots - Map of userId → DerivBot instance
  */
 export function listenTelegramAdmin(bots) {
-  if (!bot) {
-    console.log('⚠️ Telegram admin disabled.');
-    return;
-  }
+  const bot = startTelegramBot();
+  if (!bot) return;
 
-  // 🚫 Prevent multiple listeners (your previous bug)
   if (isListening) {
-    console.log('ℹ️ Telegram admin already listening — skipping.');
+    console.log('ℹ️ Telegram listener already active.');
     return;
   }
 
@@ -43,30 +57,27 @@ export function listenTelegramAdmin(bots) {
   bot.on('message', async (msg) => {
     const chatId = msg.chat.id.toString();
 
-    // Only allow the configured admin chat
     if (chatId !== TELEGRAM_CHAT_ID) return;
 
     const text = msg.text?.trim().toLowerCase();
     if (!text) return;
 
-    /* ============ COMMANDS ============ */
-
     if (text === '/status') {
-      let reply = '📊 *BOT STATUS*\n\n';
+      let reply = '📊 BOT STATUS:\n\n';
 
       if (bots.size === 0) {
-        reply = '⚠️ No bots currently running.';
+        reply = '⚠️ No bots running.';
       } else {
         bots.forEach((botInstance, userId) => {
           const u = botInstance.user;
-          reply += `• *${userId}*\n`;
+          reply += `• ${userId}\n`;
           reply += `Status: ${u.active ? '🟢 Running' : '🔴 Stopped'}\n`;
           reply += `Balance: $${u.currentBalance?.toFixed(2) ?? '0.00'}\n`;
           reply += `Trades Today: ${u.tradesToday ?? 0}\n\n`;
         });
       }
 
-      return bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
+      return bot.sendMessage(chatId, reply);
     }
 
     if (text.startsWith('/stop')) {
@@ -87,9 +98,7 @@ export function listenTelegramAdmin(bots) {
         targetBot.user.active = false;
       }
 
-      return bot.sendMessage(chatId, `🛑 Bot stopped for *${userId}*`, {
-        parse_mode: 'Markdown'
-      });
+      return bot.sendMessage(chatId, `🛑 Bot stopped for ${userId}`);
     }
 
     if (text.startsWith('/start')) {
@@ -108,29 +117,19 @@ export function listenTelegramAdmin(bots) {
       if (!targetBot.user.active) {
         await targetBot.connect();
         targetBot.user.active = true;
-
-        return bot.sendMessage(
-          chatId,
-          `✅ Bot started for *${userId}*`,
-          { parse_mode: 'Markdown' }
-        );
+        return bot.sendMessage(chatId, `✅ Bot started for ${userId}`);
       } else {
-        return bot.sendMessage(
-          chatId,
-          `ℹ️ Bot already running for *${userId}*`,
-          { parse_mode: 'Markdown' }
-        );
+        return bot.sendMessage(chatId, `ℹ️ Bot already running for ${userId}`);
       }
     }
 
     if (text === '/help') {
       return bot.sendMessage(
         chatId,
-        `📌 *Admin Commands*\n\n` +
-          `/status → Show all bots\n` +
-          `/start <userId> → Start bot\n` +
-          `/stop <userId> → Stop bot`,
-        { parse_mode: 'Markdown' }
+        `📌 Admin Commands:\n` +
+        `/status → Show bots\n` +
+        `/start <userId>\n` +
+        `/stop <userId>`
       );
     }
   });
