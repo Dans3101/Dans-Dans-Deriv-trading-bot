@@ -5,6 +5,7 @@ import express from 'express';
 import { fileURLToPath } from 'url';
 import { UserSession } from './users/userSession.js';
 import { DerivBot } from './bot/DerivBot.js';
+import { listenTelegramAdmin } from './notifications/telegramAdmin.js';
 
 /* ================= RENDER KEEP-ALIVE SERVER ================= */
 
@@ -29,10 +30,8 @@ if (!process.env.DERIV_API_TOKEN) {
 
 /* ================= LOAD USERS FROM JSON ================= */
 
-// Fix for ES modules path handling
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const usersFilePath = path.join(__dirname, '../users.json');
 
 let usersData;
@@ -56,10 +55,11 @@ console.log(`📂 Loaded ${users.length} active user(s) from users.json`);
 
 /* ================= BOT STARTUP ================= */
 
+export const bots = new Map(); // Key: userId, Value: DerivBot instance
+
 function startBots() {
   users.forEach(userData => {
     try {
-      // Replace "ENV:XXX" token placeholders with real env values
       const apiToken =
         typeof userData.apiToken === 'string' &&
         userData.apiToken.startsWith('ENV:')
@@ -81,6 +81,8 @@ function startBots() {
       const bot = new DerivBot(session);
       bot.connect();
 
+      bots.set(userData.userId, bot); // ✅ store instance for admin commands
+
       console.log(`✅ Bot started for ${userData.userId}`);
     } catch (err) {
       console.error(
@@ -93,3 +95,7 @@ function startBots() {
 
 // Delay bot start slightly so Render server initializes first
 setTimeout(startBots, 3000);
+
+/* ================= TELEGRAM ADMIN COMMANDS ================= */
+
+listenTelegramAdmin(bots); // listens for commands like /stop user_001, /status, /start all
