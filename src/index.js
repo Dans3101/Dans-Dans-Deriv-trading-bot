@@ -8,7 +8,6 @@ import { DerivBot } from './bot/DerivBot.js';
 import { listenTelegramAdmin } from './notifications/telegramAdmin.js';
 
 /* ================= RENDER KEEP-ALIVE SERVER ================= */
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -21,22 +20,17 @@ app.listen(PORT, () => {
 });
 
 /* ================= ENV CHECK ================= */
-
 if (!process.env.DERIV_API_TOKEN) {
   console.error('❌ DERIV_API_TOKEN is missing in environment variables');
-  console.error('👉 Add it in Render Environment Variables');
   process.exit(1);
 }
 
-/* ================= LOAD USERS FROM JSON ================= */
-
+/* ================= LOAD USERS ================= */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const usersFilePath = path.join(__dirname, '../users.json');
 
 let usersData;
-
 try {
   const raw = fs.readFileSync(usersFilePath, 'utf8');
   usersData = JSON.parse(raw);
@@ -46,20 +40,17 @@ try {
 }
 
 const users = (usersData.users || []).filter(u => u.active);
-
-if (users.length === 0) {
+if (!users.length) {
   console.error('❌ No active users found in users.json');
   process.exit(1);
 }
 
 console.log(`📂 Loaded ${users.length} active user(s) from users.json`);
 
-/* ================= BOT STORAGE (SINGLE SOURCE OF TRUTH) ================= */
-
+/* ================= BOT STORAGE ================= */
 export const bots = new Map(); // userId → DerivBot instance
 
 /* ================= BOT STARTUP ================= */
-
 async function startBots() {
   console.log('🚀 Starting Deriv bots...');
 
@@ -72,33 +63,25 @@ async function startBots() {
           : userData.apiToken;
 
       if (!apiToken) {
-        console.error(
-          `❌ Missing API token for ${userData.userId}. Check users.json or env vars`
-        );
+        console.error(`❌ Missing API token for ${userData.userId}`);
         continue;
       }
 
-      const session = new UserSession({
-        ...userData,
-        apiToken
-      });
-
+      const session = new UserSession({ ...userData, apiToken });
       const bot = new DerivBot(session);
-      await bot.connect();
-
-      // Store bot for Telegram admin
+      bot.connect(); // Do NOT await — keep WebSocket async
       bots.set(userData.userId, bot);
 
       console.log(`✅ Bot started for ${userData.userId}`);
+
+      // Small delay between bot startups to reduce Telegram message collisions
+      await new Promise(r => setTimeout(r, 500));
     } catch (err) {
-      console.error(
-        `❌ Failed to start bot for ${userData.userId}:`,
-        err.message
-      );
+      console.error(`❌ Failed to start bot for ${userData.userId}:`, err.message);
     }
   }
 
-  // ======== CRITICAL FIX: start Telegram ONLY ONCE ========
+  // ======== START TELEGRAM ADMIN ONLY ONCE ========
   if (!global.telegramStarted) {
     global.telegramStarted = true;
     console.log('🤖 Starting Telegram Admin...');
@@ -108,5 +91,5 @@ async function startBots() {
   }
 }
 
-// Longer delay for Render stability
+// Delay to ensure Render web server is fully up
 setTimeout(startBots, 5000);
