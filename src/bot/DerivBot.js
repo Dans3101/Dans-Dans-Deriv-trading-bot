@@ -22,6 +22,10 @@ export class DerivBot {
     this.user.currentBalance = 0;
     this.user.maxBalance = 0;
     this.user.tradesToday = 0;
+
+    // Throttle Telegram messages to avoid API spam
+    this.lastTelegramSent = 0;
+    this.telegramInterval = 2000; // 2 seconds minimum between messages
   }
 
   /* ================= CONNECTION ================= */
@@ -32,7 +36,7 @@ export class DerivBot {
 
     this.user.ws.on('open', () => {
       console.log(`[${this.user.userId}] Connected to Deriv`);
-      sendTelegramMessage(`✅ Bot connected for ${this.user.userId}`);
+      this.safeTelegram(`✅ Bot connected for ${this.user.userId}`);
       this.authorize();
       this.startHeartbeat();
     });
@@ -48,14 +52,14 @@ export class DerivBot {
     this.user.ws.on('close', (code) => {
       console.log(`[${this.user.userId}] Connection closed (code: ${code})`);
       this.user.active = false;
-      sendTelegramMessage(`🛑 Bot disconnected for ${this.user.userId}`);
+      this.safeTelegram(`🛑 Bot disconnected for ${this.user.userId}`);
       this.stopHeartbeat();
       this.scheduleReconnect();
     });
 
     this.user.ws.on('error', (err) => {
       console.error(`[${this.user.userId}] WS Error:`, err.message);
-      sendTelegramMessage(`⚠️ WebSocket error for ${this.user.userId}`);
+      this.safeTelegram(`⚠️ WebSocket error for ${this.user.userId}`);
       this.user.ws.close();
     });
   }
@@ -74,11 +78,14 @@ export class DerivBot {
     if (this.heartbeatInterval) return;
 
     this.heartbeatInterval = setInterval(() => {
-      sendTelegramMessage(
-        `💓 Heartbeat — ${this.user.userId}\n` +
+      if (!this.user.active) return;
+
+      this.safeTelegram(
+        `💓 Heartbeat — <b>${this.user.userId}</b>\n` +
           `Balance: $${this.user.currentBalance.toFixed(2)} | ` +
           `Trades today: ${this.user.tradesToday} | ` +
-          `In Trade: ${this.user.inTrade ? 'Yes' : 'No'}`
+          `In Trade: ${this.user.inTrade ? 'Yes' : 'No'}`,
+        true // silent mode to reduce spam
       );
     }, 10 * 60 * 1000); // Every 10 minutes
   }
@@ -100,12 +107,20 @@ export class DerivBot {
     this.send({ authorize: this.user.apiToken });
   }
 
+  /* ================= SAFE TELEGRAM SENDER ================= */
+  safeTelegram(message, silent = false) {
+    const now = Date.now();
+    if (now - this.lastTelegramSent < this.telegramInterval) return;
+    this.lastTelegramSent = now;
+    sendTelegramMessage(message, silent);
+  }
+
   /* ================= MESSAGE HANDLER ================= */
 
   handleMessage(data) {
     switch (data.msg_type) {
       case 'authorize':
-        sendTelegramMessage(`🤖 Bot authorized for ${this.user.userId}`);
+        this.safeTelegram(`🤖 Bot authorized for <b>${this.user.userId}</b>`);
         this.subscribeBalance();
         this.getCandles();
         break;
@@ -173,22 +188,17 @@ export class DerivBot {
   /* ================= TRADING LOGIC ================= */
 
   tryTrade() {
-    if (!this.user.active) return;
-    if (this.user.inTrade) return;
+    if (!this.user.active || this.user.inTrade) return;
 
     if (!canTrade(this.user)) {
-      sendTelegramMessage(
-        `💰 Performance fee unpaid. Bot locked for ${this.user.userId}`
-      );
+      this.safeTelegram(`💰 Performance fee unpaid. Bot locked for <b>${this.user.userId}</b>`);
       this.user.ws.close();
       return;
     }
 
     const status = checkLimits(this.user);
     if (status !== 'OK') {
-      sendTelegramMessage(
-        `🛑 Bot stopped for ${this.user.userId} – ${status}`
-      );
+      this.safeTelegram(`🛑 Bot stopped for <b>${this.user.userId}</b> – ${status}`);
       this.user.ws.close();
       return;
     }
@@ -204,13 +214,8 @@ export class DerivBot {
     this.user.inTrade = true;
     this.user.tradesToday++;
 
-    console.log(
-      `[${this.user.userId}] ${direction} | Stake $${stake.toFixed(2)}`
-    );
-
-    sendTelegramMessage(
-      `🚀 Trade Opened: ${direction}\nStake: $${stake.toFixed(2)}`
-    );
+    console.log(`[${this.user.userId}] ${direction} | Stake $${stake.toFixed(2)}`);
+    this.safeTelegram(`🚀 Trade Opened: ${direction}\nStake: $${stake.toFixed(2)}`);
 
     this.send({
       buy: 1,
@@ -243,7 +248,6 @@ export class DerivBot {
     if (!contract.is_sold) return;
 
     const profit = Number(contract.profit);
-
     this.user.inTrade = false;
     this.currentContractId = null;
 
@@ -251,8 +255,8 @@ export class DerivBot {
 
     console.log(`[${this.user.userId}] ${result} | Profit: ${profit}`);
 
-    sendTelegramMessage(
-      `📊 ${this.user.userId} ${result}\nProfit: ${profit.toFixed(2)}`
+    this.safeTelegram(
+      `📊 <b>${this.user.userId}</b> ${result}\nProfit: ${profit.toFixed(2)}`
     );
 
     logTrade({
