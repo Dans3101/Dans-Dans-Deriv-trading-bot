@@ -24,6 +24,57 @@ if (!process.env.DERIV_API_TOKEN) {
   process.exit(1);
 }
 
+/* ================= MULTI-USER BOT MANAGER ================= */
+
+class BotManager {
+  constructor() {
+    this.bots = new Map(); // userId -> DerivBot
+  }
+
+  addUser(userData) {
+    if (this.bots.has(userData.userId)) {
+      console.log(`⚠️ Bot already exists for ${userData.userId}`);
+      return;
+    }
+
+    const session = new UserSession(userData);
+    const bot = new DerivBot(session);
+
+    this.bots.set(userData.userId, bot);
+    console.log(`➕ Registered bot for ${userData.userId}`);
+  }
+
+  startBot(userId) {
+    const bot = this.bots.get(userId);
+    if (!bot) {
+      console.log(`❌ No bot found for ${userId}`);
+      return;
+    }
+
+    bot.connect();
+    console.log(`▶️ Started bot for ${userId}`);
+  }
+
+  stopBot(userId) {
+    const bot = this.bots.get(userId);
+    if (!bot) return;
+
+    if (bot.user.ws) bot.user.ws.close();
+    this.bots.delete(userId);
+    console.log(`🛑 Stopped bot for ${userId}`);
+  }
+
+  startAll() {
+    for (const userId of this.bots.keys()) {
+      this.startBot(userId);
+    }
+  }
+
+  listUsers() {
+    return Array.from(this.bots.keys());
+  }
+}
+
 /* ================= USERS CONFIG ================= */
 
 const users = [
@@ -31,23 +82,28 @@ const users = [
     userId: 'user_001',
     apiToken: process.env.DERIV_API_TOKEN,
     market: 'R_75'
+  },
+
+  // 👇 You can add more users later like this:
+  /*
+  {
+    userId: 'user_002',
+    apiToken: process.env.DERIV_API_TOKEN_2,
+    market: 'R_100'
   }
+  */
 ];
 
 /* ================= BOT STARTUP ================= */
 
-function startBots() {
-  users.forEach(userData => {
-    try {
-      const session = new UserSession(userData);
-      const bot = new DerivBot(session);
-      bot.connect();
-      console.log(`✅ Bot started for ${userData.userId}`);
-    } catch (err) {
-      console.error(`❌ Failed to start bot for ${userData.userId}`, err);
-    }
-  });
-}
+const botManager = new BotManager();
 
-// Delay bot start slightly so Render server initializes first
-setTimeout(startBots, 3000);
+// Register all users
+users.forEach(userData => botManager.addUser(userData));
+
+// Start all bots after Render boots
+setTimeout(() => {
+  console.log("🚀 Starting all bots...");
+  botManager.startAll();
+  console.log("👥 Active bots:", botManager.listUsers());
+}, 3000);
