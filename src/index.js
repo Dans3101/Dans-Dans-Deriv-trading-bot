@@ -54,15 +54,17 @@ if (users.length === 0) {
 
 console.log(`📂 Loaded ${users.length} active user(s) from users.json`);
 
-/* ================= BOT STORAGE (FIXED) ================= */
+/* ================= BOT STORAGE (SINGLE SOURCE OF TRUTH) ================= */
 
-// ✅ ONE SINGLE DECLARATION — NO DUPLICATES
+// ✅ SINGLE GLOBAL MAP — NO DUPLICATES
 export const bots = new Map(); // userId → DerivBot instance
 
 /* ================= BOT STARTUP ================= */
 
-function startBots() {
-  users.forEach(userData => {
+async function startBots() {
+  console.log('🚀 Starting Deriv bots...');
+
+  for (const userData of users) {
     try {
       const apiToken =
         typeof userData.apiToken === 'string' &&
@@ -74,7 +76,7 @@ function startBots() {
         console.error(
           `❌ Missing API token for ${userData.userId}. Check users.json or env vars`
         );
-        return;
+        continue;
       }
 
       const session = new UserSession({
@@ -83,9 +85,9 @@ function startBots() {
       });
 
       const bot = new DerivBot(session);
-      bot.connect();
+      await bot.connect();
 
-      // ✅ STORE BOT IN MAP FOR TELEGRAM ADMIN
+      // ✅ STORE BOT FOR TELEGRAM ADMIN
       bots.set(userData.userId, bot);
 
       console.log(`✅ Bot started for ${userData.userId}`);
@@ -95,11 +97,12 @@ function startBots() {
         err.message
       );
     }
-  });
+  }
 
-  // ✅ START TELEGRAM ADMIN AFTER BOTS ARE READY
+  // ✅ START TELEGRAM ADMIN **ONCE**
+  console.log('🤖 Starting Telegram Admin...');
   listenTelegramAdmin(bots);
 }
 
-// Delay so Render server starts first
+// Small delay so Render server initializes first
 setTimeout(startBots, 3000);
