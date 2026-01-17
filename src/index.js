@@ -7,6 +7,22 @@ import { UserSession } from './users/userSession.js';
 import { DerivBot } from './bot/DerivBot.js';
 import { listenTelegramAdmin } from './notifications/telegramAdmin.js';
 
+const bots = [];
+users.forEach(userData => {
+  const apiToken =
+    userData.apiToken.startsWith('ENV:')
+      ? process.env[userData.apiToken.replace('ENV:', '')]
+      : userData.apiToken;
+
+  const session = new UserSession({ ...userData, apiToken });
+  const bot = new DerivBot(session);
+  bot.connect();
+  bots.push(bot);
+});
+
+// Start listening for admin commands
+listenTelegramAdmin(bots);
+
 /* ================= RENDER KEEP-ALIVE SERVER ================= */
 
 const app = express();
