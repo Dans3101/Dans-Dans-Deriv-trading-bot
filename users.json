@@ -4,7 +4,8 @@
       "userId": "user_001",
       "apiToken": "ENV:DERIV_API_TOKEN",
       "market": "R_75",
-      "active": true
+      "active": true,
+      "accountType": "demo"
     }
   ]
 }
