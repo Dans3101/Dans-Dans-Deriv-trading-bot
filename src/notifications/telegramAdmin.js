@@ -2,21 +2,21 @@
 import TelegramBot from 'node-telegram-bot-api';
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 let bot = null;
 
 export function listenTelegramAdmin(bots) {
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.log('⚠️ Telegram admin disabled — missing env variables.');
+  if (!TELEGRAM_TOKEN) {
+    console.log('⚠️ Telegram admin disabled — missing BOT token.');
     return;
   }
 
-  // Stop any previous polling to avoid 409 conflict
+  // Stop any previous polling to avoid 409 errors
   try {
     bot?.stopPolling();
   } catch (e) {}
 
+  // Create a new bot instance
   bot = new TelegramBot(TELEGRAM_TOKEN, {
     polling: true,
     filepath: false
@@ -26,25 +26,19 @@ export function listenTelegramAdmin(bots) {
   console.log('📡 Telegram admin listener active.');
 
   bot.on('message', async (msg) => {
-    const chatId = msg.chat.id.toString();
-
-    // Allow only your admin chat
-    if (chatId !== TELEGRAM_CHAT_ID) return;
-
+    const chatId = msg.chat.id;
     const text = msg.text?.trim();
     if (!text) return;
 
     const lower = text.toLowerCase();
 
-    // ========== /STATUS ==========
+    // ====== /status ======
     if (lower === '/status') {
       let reply = '📊 <b>BOT STATUS</b>\n\n';
 
       bots.forEach((botInstance, userId) => {
         const u = botInstance.user;
-
         reply += `• <b>${userId}</b>\n`;
-        reply += `Account: ${u.accountType}\n`;
         reply += `Running: ${u.active ? '🟢' : '🔴'}\n`;
         reply += `Balance: $${u.currentBalance.toFixed(2)}\n`;
         reply += `Trades today: ${u.tradesToday}\n`;
@@ -54,42 +48,27 @@ export function listenTelegramAdmin(bots) {
       return bot.sendMessage(chatId, reply, { parse_mode: 'HTML' });
     }
 
-    // ========== /STOP userId ==========
+    // ====== /stop userId ======
     if (lower.startsWith('/stop')) {
       const userId = text.split(' ')[1];
-
-      if (!userId) {
-        return bot.sendMessage(chatId, '❌ Usage: /stop user_001');
-      }
+      if (!userId) return bot.sendMessage(chatId, '❌ Usage: /stop user_001');
 
       const targetBot = bots.get(userId);
+      if (!targetBot) return bot.sendMessage(chatId, `❌ Bot "${userId}" not found.`);
 
-      if (!targetBot) {
-        return bot.sendMessage(chatId, `❌ Bot "${userId}" not found.`);
-      }
-
-      if (targetBot.user.ws) {
-        targetBot.user.ws.close();
-      }
-
+      if (targetBot.user.ws) targetBot.user.ws.close();
       targetBot.user.active = false;
 
       return bot.sendMessage(chatId, `🛑 Bot stopped for ${userId}`);
     }
 
-    // ========== /START userId ==========
+    // ====== /start userId ======
     if (lower.startsWith('/start')) {
       const userId = text.split(' ')[1];
-
-      if (!userId) {
-        return bot.sendMessage(chatId, '❌ Usage: /start user_001');
-      }
+      if (!userId) return bot.sendMessage(chatId, '❌ Usage: /start user_001');
 
       const targetBot = bots.get(userId);
-
-      if (!targetBot) {
-        return bot.sendMessage(chatId, `❌ Bot "${userId}" not found.`);
-      }
+      if (!targetBot) return bot.sendMessage(chatId, `❌ Bot "${userId}" not found.`);
 
       if (!targetBot.user.active) {
         targetBot.connect();
@@ -99,30 +78,19 @@ export function listenTelegramAdmin(bots) {
       }
     }
 
-    // ========== /PAY userId  → UNLOCK REAL TRADING ==========
+    // ====== /pay userId ======
     if (lower.startsWith('/pay')) {
       const userId = text.split(' ')[1];
-
-      if (!userId) {
-        return bot.sendMessage(chatId, '❌ Usage: /pay user_001');
-      }
+      if (!userId) return bot.sendMessage(chatId, '❌ Usage: /pay user_001');
 
       const targetBot = bots.get(userId);
-
-      if (!targetBot) {
-        return bot.sendMessage(chatId, `❌ Bot "${userId}" not found.`);
-      }
+      if (!targetBot) return bot.sendMessage(chatId, `❌ Bot "${userId}" not found.`);
 
       targetBot.user.performanceFeePaid = true;
-
-      return bot.sendMessage(
-        chatId,
-        `💸 Payment confirmed — trading UNLOCKED for <b>${userId}</b>`,
-        { parse_mode: 'HTML' }
-      );
+      return bot.sendMessage(chatId, `💸 Payment confirmed — trading UNLOCKED for <b>${userId}</b>`, { parse_mode: 'HTML' });
     }
 
-    // ========== /HELP ==========
+    // ====== /help ======
     if (lower === '/help') {
       const helpText = `
 📌 <b>Admin Commands</b>
@@ -139,7 +107,6 @@ export function listenTelegramAdmin(bots) {
 • /pay user_001  
 → Mark fee as PAID (unlock real trading)
 `;
-
       return bot.sendMessage(chatId, helpText, { parse_mode: 'HTML' });
     }
   });
