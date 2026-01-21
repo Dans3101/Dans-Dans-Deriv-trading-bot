@@ -1,3 +1,5 @@
+// src/bot/DerivBot.js
+
 import WebSocket from 'ws';
 import { DERIV_WS } from '../config/deriv.js';
 import { calculateStake, checkLimits } from './riskManager.js';
@@ -14,6 +16,7 @@ export class DerivBot {
     this.currentContractId = null;
     this.reconnectTimeout = null;
 
+    // ===== USER STATE =====
     this.user.active = false;
     this.user.inTrade = false;
     this.user.startBalance = 0;
@@ -21,6 +24,13 @@ export class DerivBot {
     this.user.maxBalance = 0;
     this.user.tradesToday = 0;
 
+    // ===== MARTINGALE STATE =====
+    this.user.lastTradeResult = null;
+    this.user.martingaleStep = 0;
+    this.user.maxMartingaleSteps = 5;
+    this.user.baseStake = null;
+
+    // ===== TELEGRAM RATE LIMIT =====
     this.lastTelegramSent = 0;
     this.telegramInterval = 2000;
   }
@@ -80,7 +90,6 @@ export class DerivBot {
     const now = Date.now();
     if (now - this.lastTelegramSent < this.telegramInterval) return;
     this.lastTelegramSent = now;
-
     sendTelegramMessage(message);
   }
 
@@ -91,7 +100,7 @@ export class DerivBot {
       case 'authorize':
         console.log(`[${this.user.userId}] Authorized`);
         this.subscribeBalance();
-        this.subscribeCandles(); // 🔥 CRITICAL
+        this.subscribeCandles();
         break;
 
       case 'balance':
@@ -100,7 +109,7 @@ export class DerivBot {
 
       case 'candles':
         this.candles = data.candles;
-        this.tryTrade(); // 🔥 TRADE TRIGGER
+        this.tryTrade();
         break;
 
       case 'buy':
@@ -123,11 +132,18 @@ export class DerivBot {
     }
 
     this.user.currentBalance = balance;
+
     if (balance > this.user.maxBalance) {
       this.user.maxBalance = balance;
     }
 
+    // 🔥 Activate trading immediately
     this.user.active = true;
+
+    // 🔥 Trade instantly if candles already exist
+    if (this.candles.length >= 10) {
+      this.tryTrade();
+    }
   }
 
   subscribeBalance() {
@@ -142,7 +158,7 @@ export class DerivBot {
       style: 'candles',
       granularity: 60,
       count: 30,
-      subscribe: 1 // 🔥 REQUIRED
+      subscribe: 1
     });
   }
 
@@ -166,7 +182,16 @@ export class DerivBot {
     const direction = decideTradeDirection(this.candles);
     if (!direction) return;
 
-    const stake = calculateStake(this.user.currentBalance);
+    const stake = calculateStake(this.user);
+
+    if (stake === 'MARTINGALE_LIMIT_REACHED') {
+      console.warn(`[${this.user.userId}] Martingale exhausted. Bot stopped.`);
+      this.safeTelegram(
+        `🛑 ${this.user.userId}\nMartingale limit reached.\nBot stopped.`
+      );
+      this.user.active = false;
+      return;
+    }
 
     this.user.inTrade = true;
     this.user.tradesToday++;
@@ -215,6 +240,9 @@ export class DerivBot {
 
     const result = profit >= 0 ? 'WIN' : 'LOSS';
 
+    // 🔥 FEED MARTINGALE ENGINE
+    this.user.lastTradeResult = result;
+
     console.log(
       `[${this.user.userId}] ${result} | ${profit.toFixed(2)}`
     );
@@ -231,5 +259,10 @@ export class DerivBot {
       profit,
       balance: this.user.currentBalance
     });
+
+    // 🔁 AUTO-RETRADE
+    setTimeout(() => {
+      this.tryTrade();
+    }, 500);
   }
 }
