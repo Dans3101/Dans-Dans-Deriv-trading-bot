@@ -24,11 +24,8 @@ export class DerivBot {
     this.user.maxBalance = 0;
     this.user.tradesToday = 0;
 
-    // ===== MARTINGALE STATE =====
-    this.user.lastTradeResult = null;
-    this.user.martingaleStep = 0;
-    this.user.maxMartingaleSteps = 5;
-    this.user.baseStake = null;
+    // ===== FORCE FIRST TRADE =====
+    this.firstTradeDone = false;
 
     // ===== TELEGRAM RATE LIMIT =====
     this.lastTelegramSent = 0;
@@ -84,7 +81,7 @@ export class DerivBot {
     this.send({ authorize: this.user.apiToken });
   }
 
-  /* ================= TELEGRAM (NO CHAT ID) ================= */
+  /* ================= TELEGRAM ================= */
 
   safeTelegram(message) {
     const now = Date.now();
@@ -132,17 +129,15 @@ export class DerivBot {
     }
 
     this.user.currentBalance = balance;
-
     if (balance > this.user.maxBalance) {
       this.user.maxBalance = balance;
     }
 
-    // 🔥 Activate trading immediately
     this.user.active = true;
 
-    // 🔥 Trade instantly if candles already exist
-    if (this.candles.length >= 10) {
-      this.tryTrade();
+    // 🔥 FORCE FIRST TRADE WHEN READY
+    if (this.candles.length >= 10 && !this.firstTradeDone) {
+      this.tryTrade(true);
     }
   }
 
@@ -164,37 +159,30 @@ export class DerivBot {
 
   /* ================= TRADING LOGIC ================= */
 
-  tryTrade() {
-    if (!this.user.active) return;
-    if (this.user.inTrade) return;
+  tryTrade(force = false) {
+    if (!this.user.active || this.user.inTrade) return;
 
-    if (!canTrade(this.user)) {
-      console.warn(`[${this.user.userId}] Trading blocked`);
-      return;
-    }
+    if (!canTrade(this.user)) return;
 
     const status = checkLimits(this.user);
-    if (status !== 'OK') {
-      console.warn(`[${this.user.userId}] Limit hit: ${status}`);
-      return;
+    if (status !== 'OK') return;
+
+    let direction = decideTradeDirection(this.candles);
+
+    // 🔥 FORCE FIRST TRADE DIRECTION
+    if (!direction && force) {
+      direction = 'CALL';
+      console.log(`[${this.user.userId}] Forced first trade`);
     }
 
-    const direction = decideTradeDirection(this.candles);
     if (!direction) return;
 
-    const stake = calculateStake(this.user);
-
-    if (stake === 'MARTINGALE_LIMIT_REACHED') {
-      console.warn(`[${this.user.userId}] Martingale exhausted. Bot stopped.`);
-      this.safeTelegram(
-        `🛑 ${this.user.userId}\nMartingale limit reached.\nBot stopped.`
-      );
-      this.user.active = false;
-      return;
-    }
+    const stake = calculateStake(this.user.currentBalance);
+    if (!stake || stake <= 0) return;
 
     this.user.inTrade = true;
     this.user.tradesToday++;
+    this.firstTradeDone = true;
 
     console.log(
       `[${this.user.userId}] TRADE → ${direction} $${stake.toFixed(2)}`
@@ -240,9 +228,6 @@ export class DerivBot {
 
     const result = profit >= 0 ? 'WIN' : 'LOSS';
 
-    // 🔥 FEED MARTINGALE ENGINE
-    this.user.lastTradeResult = result;
-
     console.log(
       `[${this.user.userId}] ${result} | ${profit.toFixed(2)}`
     );
@@ -260,9 +245,7 @@ export class DerivBot {
       balance: this.user.currentBalance
     });
 
-    // 🔁 AUTO-RETRADE
-    setTimeout(() => {
-      this.tryTrade();
-    }, 500);
+    // 🔁 CONTINUE TRADING
+    setTimeout(() => this.tryTrade(), 1000);
   }
 }
