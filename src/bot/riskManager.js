@@ -4,44 +4,47 @@ import { SETTINGS } from '../config/deriv.js';
 
 export function calculateStake(user) {
   const risk = SETTINGS?.RISK_PERCENT ?? 0.10;
+  const maxStake = SETTINGS?.MAX_STAKE ?? 100;
 
-  // Safety guards
+  // Safety guard
   if (!user.currentBalance || user.currentBalance <= 0) {
     return 1;
   }
 
-  // Base stake (saved once)
+  // Initialize base stake ONCE
   if (!user.baseStake) {
     user.baseStake = Math.max(
       1,
-      Math.min(user.currentBalance * risk, 100)
+      Math.min(user.currentBalance * risk, maxStake)
     );
+    user.martingaleStep = 0;
   }
 
   let stake = user.baseStake;
 
-  // 🔥 APPLY MARTINGALE AFTER LOSS
+  /* ===== MARTINGALE AFTER LOSS ===== */
   if (user.lastTradeResult === 'LOSS') {
-    if (user.martingaleStep < user.maxMartingaleSteps) {
-      user.martingaleStep += 1;
-      stake = user.baseStake * Math.pow(2, user.martingaleStep);
-    } else {
-      // Hard stop if martingale exceeded
+    if (user.martingaleStep >= user.maxMartingaleSteps) {
       console.warn(
-        `[${user.userId}] Max martingale steps reached`
+        `[${user.userId}] Martingale limit reached (${user.martingaleStep})`
       );
       return 'MARTINGALE_LIMIT_REACHED';
     }
+
+    user.martingaleStep += 1;
+    stake = user.baseStake * Math.pow(2, user.martingaleStep);
   }
 
-  // Reset after win
+  /* ===== RESET AFTER WIN ===== */
   if (user.lastTradeResult === 'WIN') {
     user.martingaleStep = 0;
     stake = user.baseStake;
   }
 
-  // Absolute safety cap
-  stake = Math.min(stake, SETTINGS?.MAX_STAKE ?? 100);
+  /* ===== FINAL SAFETY CAPS ===== */
+  stake = Math.min(stake, maxStake);
+  stake = Math.min(stake, user.currentBalance);
+  stake = Math.max(stake, 1);
 
   return Number(stake.toFixed(2));
 }
