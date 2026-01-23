@@ -1,7 +1,7 @@
 /**
  * Performance fee gate:
  * - DEMO → always allowed
- * - REAL → must pay fee
+ * - REAL → must pay fee after profit
  */
 
 export function calculatePerformanceFee(startBalance, maxBalance) {
@@ -14,12 +14,20 @@ export function calculatePerformanceFee(startBalance, maxBalance) {
 }
 
 export function canTrade(user) {
-  // ✅ DEMO accounts trade freely
-  if (user.accountType === 'demo') {
+  // ✅ DEFAULT TO DEMO IF NOT SET
+  const accountType = user.accountType || 'demo';
+
+  // ✅ DEMO accounts always trade
+  if (accountType === 'demo') {
     return true;
   }
 
-  // 🔴 REAL account must pay fee
+  // ⏳ Allow trading until balances are initialized
+  if (!user.startBalance || !user.maxBalance) {
+    return true;
+  }
+
+  // 🔴 REAL account fee enforcement
   const fee = calculatePerformanceFee(
     user.startBalance,
     user.maxBalance
