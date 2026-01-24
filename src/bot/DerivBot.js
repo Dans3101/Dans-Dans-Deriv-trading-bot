@@ -104,6 +104,15 @@ export class DerivBot {
         this.handleBalance(data.balance.balance);
         break;
 
+     case 'candles':
+  console.log(
+    `[${this.user.userId}] Candles received:`,
+    data.candles?.length
+  );
+  this.candles = data.candles;
+  this.tryTrade();
+  break;
+
       case 'candles':
         this.candles = data.candles;
         this.tryTrade();
