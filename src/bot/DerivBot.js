@@ -1,7 +1,7 @@
 // src/bot/DerivBot.js
 
 import WebSocket from 'ws';
-import { DERIV_WS } from '../config/deriv.js';
+import { DERIV_WS, SETTINGS } from '../config/deriv.js';
 import { calculateStake, checkLimits } from './riskManager.js';
 import { decideTradeDirection } from './strategy.js';
 import { sendTelegramMessage } from '../notifications/telegram.js';
@@ -24,7 +24,13 @@ export class DerivBot {
     this.user.maxBalance = 0;
     this.user.tradesToday = 0;
 
-    // ===== FIRST TRADE FLAG =====
+    // ===== MARTINGALE STATE =====
+    this.user.lastTradeResult = null;
+    this.user.martingaleStep = 0;
+    this.user.baseStake = null;
+    this.user.maxMartingaleSteps = SETTINGS.MAX_MARTINGALE_STEPS || 5;
+
+    // ===== FORCE FIRST TRADE =====
     this.firstTradeDone = false;
 
     // ===== TELEGRAM RATE LIMIT =====
@@ -47,7 +53,7 @@ export class DerivBot {
       try {
         this.handleMessage(JSON.parse(msg));
       } catch (e) {
-        console.error(`[${this.user.userId}] JSON parse error`, e.message);
+        console.error(`[${this.user.userId}] Parse error`, e.message);
       }
     });
 
@@ -65,7 +71,6 @@ export class DerivBot {
 
   scheduleReconnect() {
     if (this.reconnectTimeout) return;
-
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null;
       this.connect();
@@ -94,14 +99,6 @@ export class DerivBot {
   /* ================= MESSAGE HANDLER ================= */
 
   handleMessage(data) {
-    if (data.error) {
-      console.error(
-        `[${this.user.userId}] Deriv error:`,
-        data.error.message
-      );
-      return;
-    }
-
     switch (data.msg_type) {
       case 'authorize':
         console.log(`[${this.user.userId}] Authorized`);
@@ -114,10 +111,11 @@ export class DerivBot {
         break;
 
       case 'candles':
-        this.candles = data.candles || [];
         console.log(
-          `[${this.user.userId}] Candles loaded: ${this.candles.length}`
+          `[${this.user.userId}] Candles received:`,
+          data.candles?.length
         );
+        this.candles = data.candles;
         this.tryTrade();
         break;
 
@@ -128,6 +126,9 @@ export class DerivBot {
 
       case 'proposal_open_contract':
         this.handleContractUpdate(data.proposal_open_contract);
+        break;
+
+      default:
         break;
     }
   }
@@ -141,13 +142,14 @@ export class DerivBot {
     }
 
     this.user.currentBalance = balance;
+
     if (balance > this.user.maxBalance) {
       this.user.maxBalance = balance;
     }
 
     this.user.active = true;
 
-    // 🔥 FORCE FIRST TRADE
+    // 🔥 FORCE FIRST TRADE WHEN READY
     if (this.candles.length >= 10 && !this.firstTradeDone) {
       this.tryTrade(true);
     }
@@ -160,29 +162,41 @@ export class DerivBot {
   /* ================= CANDLES ================= */
 
   subscribeCandles() {
-    this.send({
+    if (!this.user.market) {
+      console.error(`[${this.user.userId}] Invalid market symbol`);
+      return;
+    }
+
+    const payload = {
       ticks_history: this.user.market,
       style: 'candles',
-      granularity: 60,
-      count: 30,
+      granularity: SETTINGS.CANDLE_GRANULARITY,
+      count: SETTINGS.CANDLE_COUNT,
       subscribe: 1
-    });
+    };
+
+    console.log(`[${this.user.userId}] Subscribing candles:`, payload);
+    this.send(payload);
   }
 
-  /* ================= TRADING ================= */
+  /* ================= TRADING LOGIC ================= */
 
   tryTrade(force = false) {
-    if (!this.user.active) return;
-    if (this.user.inTrade) return;
+    if (!this.user.active || this.user.inTrade) return;
 
-    if (!canTrade(this.user)) return;
+    if (!canTrade(this.user)) {
+      console.warn(`[${this.user.userId}] Trading blocked by PaymentGuard`);
+      return;
+    }
 
-    const limitStatus = checkLimits(this.user);
-    if (limitStatus !== 'OK') return;
+    const status = checkLimits(this.user);
+    if (status !== 'OK') {
+      console.warn(`[${this.user.userId}] Limit hit: ${status}`);
+      return;
+    }
 
     let direction = decideTradeDirection(this.candles);
 
-    // 🔥 FORCE FIRST TRADE
     if (!direction && force) {
       direction = 'CALL';
       console.log(`[${this.user.userId}] Forced first trade`);
@@ -190,8 +204,11 @@ export class DerivBot {
 
     if (!direction) return;
 
-    const stake = calculateStake(this.user.currentBalance);
-    if (!stake || stake <= 0) return;
+    const stake = calculateStake(this.user);
+    if (!stake || stake <= 0 || stake === 'MARTINGALE_LIMIT_REACHED') {
+      console.warn(`[${this.user.userId}] Invalid stake, skipping trade`);
+      return;
+    }
 
     this.user.inTrade = true;
     this.user.tradesToday++;
@@ -240,6 +257,7 @@ export class DerivBot {
     this.currentContractId = null;
 
     const result = profit >= 0 ? 'WIN' : 'LOSS';
+    this.user.lastTradeResult = result;
 
     console.log(
       `[${this.user.userId}] ${result} | ${profit.toFixed(2)}`
