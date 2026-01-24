@@ -1,18 +1,18 @@
 import { SETTINGS } from '../config/deriv.js';
 
-/* ================= STAKE CALCULATION (WITH MARTINGALE) ================= */
+/* ================= STAKE CALCULATION ================= */
 
 export function calculateStake(user) {
-  const risk = SETTINGS?.RISK_PERCENT ?? 0.10;
+  const risk = SETTINGS?.RISK_PERCENT ?? 0.1;
   const maxStake = SETTINGS?.MAX_STAKE ?? 100;
+  const maxMartingaleSteps = SETTINGS?.MAX_MARTINGALE_STEPS ?? 3;
 
-  // Safety guard
-  if (!user.currentBalance || user.currentBalance <= 0) {
+  if (!user || !user.currentBalance || user.currentBalance <= 0) {
     return 1;
   }
 
-  // Initialize base stake ONCE
-  if (!user.baseStake) {
+  /* ===== INITIALIZE BASE STAKE ===== */
+  if (user.baseStake === undefined) {
     user.baseStake = Math.max(
       1,
       Math.min(user.currentBalance * risk, maxStake)
@@ -24,15 +24,16 @@ export function calculateStake(user) {
 
   /* ===== MARTINGALE AFTER LOSS ===== */
   if (user.lastTradeResult === 'LOSS') {
-    if (user.martingaleStep >= user.maxMartingaleSteps) {
+    if (user.martingaleStep >= maxMartingaleSteps) {
       console.warn(
-        `[${user.userId}] Martingale limit reached (${user.martingaleStep})`
+        `[${user.userId}] Martingale limit reached`
       );
-      return 'MARTINGALE_LIMIT_REACHED';
+      user.martingaleStep = 0;
+      stake = user.baseStake;
+    } else {
+      user.martingaleStep += 1;
+      stake = user.baseStake * Math.pow(2, user.martingaleStep);
     }
-
-    user.martingaleStep += 1;
-    stake = user.baseStake * Math.pow(2, user.martingaleStep);
   }
 
   /* ===== RESET AFTER WIN ===== */
@@ -52,7 +53,7 @@ export function calculateStake(user) {
 /* ================= TRADING LIMITS ================= */
 
 export function checkLimits(user) {
-  if (!user.startBalance) return 'WAITING_FOR_BALANCE';
+  if (!user || !user.startBalance) return 'WAITING_FOR_BALANCE';
 
   const profitTarget =
     user.startBalance *
@@ -60,7 +61,7 @@ export function checkLimits(user) {
 
   const lossLimit =
     user.startBalance *
-    (1 - (SETTINGS?.STOP_LOSS_PERCENT ?? 0.20));
+    (1 - (SETTINGS?.STOP_LOSS_PERCENT ?? 0.2));
 
   if (user.currentBalance >= profitTarget) {
     return 'PROFIT_TARGET_REACHED';
