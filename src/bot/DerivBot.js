@@ -24,7 +24,7 @@ export class DerivBot {
     this.user.maxBalance = 0;
     this.user.tradesToday = 0;
 
-    // ===== FORCE FIRST TRADE =====
+    // ===== FIRST TRADE FLAG =====
     this.firstTradeDone = false;
 
     // ===== TELEGRAM RATE LIMIT =====
@@ -47,7 +47,7 @@ export class DerivBot {
       try {
         this.handleMessage(JSON.parse(msg));
       } catch (e) {
-        console.error(`[${this.user.userId}] Parse error`, e.message);
+        console.error(`[${this.user.userId}] JSON parse error`, e.message);
       }
     });
 
@@ -65,6 +65,7 @@ export class DerivBot {
 
   scheduleReconnect() {
     if (this.reconnectTimeout) return;
+
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null;
       this.connect();
@@ -93,6 +94,14 @@ export class DerivBot {
   /* ================= MESSAGE HANDLER ================= */
 
   handleMessage(data) {
+    if (data.error) {
+      console.error(
+        `[${this.user.userId}] Deriv error:`,
+        data.error.message
+      );
+      return;
+    }
+
     switch (data.msg_type) {
       case 'authorize':
         console.log(`[${this.user.userId}] Authorized`);
@@ -104,17 +113,11 @@ export class DerivBot {
         this.handleBalance(data.balance.balance);
         break;
 
-     case 'candles':
-       console.log(
-       `[${this.user.userId}] Candles received:`,
-        data.candles?.length
-        );
-        this.candles = data.candles;
-        this.tryTrade();
-        break;
-
       case 'candles':
-        this.candles = data.candles;
+        this.candles = data.candles || [];
+        console.log(
+          `[${this.user.userId}] Candles loaded: ${this.candles.length}`
+        );
         this.tryTrade();
         break;
 
@@ -144,7 +147,7 @@ export class DerivBot {
 
     this.user.active = true;
 
-    // 🔥 FORCE FIRST TRADE WHEN READY
+    // 🔥 FORCE FIRST TRADE
     if (this.candles.length >= 10 && !this.firstTradeDone) {
       this.tryTrade(true);
     }
@@ -166,19 +169,20 @@ export class DerivBot {
     });
   }
 
-  /* ================= TRADING LOGIC ================= */
+  /* ================= TRADING ================= */
 
   tryTrade(force = false) {
-    if (!this.user.active || this.user.inTrade) return;
+    if (!this.user.active) return;
+    if (this.user.inTrade) return;
 
     if (!canTrade(this.user)) return;
 
-    const status = checkLimits(this.user);
-    if (status !== 'OK') return;
+    const limitStatus = checkLimits(this.user);
+    if (limitStatus !== 'OK') return;
 
     let direction = decideTradeDirection(this.candles);
 
-    // 🔥 FORCE FIRST TRADE DIRECTION
+    // 🔥 FORCE FIRST TRADE
     if (!direction && force) {
       direction = 'CALL';
       console.log(`[${this.user.userId}] Forced first trade`);
