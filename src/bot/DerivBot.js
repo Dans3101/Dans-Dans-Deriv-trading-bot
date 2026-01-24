@@ -105,13 +105,13 @@ export class DerivBot {
         break;
 
      case 'candles':
-  console.log(
-    `[${this.user.userId}] Candles received:`,
-    data.candles?.length
-  );
-  this.candles = data.candles;
-  this.tryTrade();
-  break;
+       console.log(
+       `[${this.user.userId}] Candles received:`,
+        data.candles?.length
+        );
+        this.candles = data.candles;
+        this.tryTrade();
+        break;
 
       case 'candles':
         this.candles = data.candles;
