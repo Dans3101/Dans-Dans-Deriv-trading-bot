@@ -160,22 +160,23 @@ export class DerivBot {
   /* ================= CANDLES ================= */
 
   subscribeCandles() {
-    if (!this.user.market) {
-      console.error(`[${this.user.userId}] ❌ Market not set`);
-      return;
-    }
-
-    const payload = {
-      ticks_history: this.user.market,
-      style: 'candles',
-      granularity: SETTINGS.CANDLE_GRANULARITY,
-      count: SETTINGS.CANDLE_COUNT,
-      subscribe: 1
-    };
-
-    console.log(`[${this.user.userId}] 📡 Subscribing candles`);
-    this.send(payload);
+  if (!this.user.market) {
+    console.error(`[${this.user.userId}] ❌ Market not set`);
+    return;
   }
+
+  console.log(`[${this.user.userId}] 📡 Requesting candles`);
+
+  this.send({
+    ticks_history: this.user.market,
+    style: 'candles',
+    granularity: SETTINGS.CANDLE_GRANULARITY,
+    count: SETTINGS.CANDLE_COUNT
+  });
+
+  // 🔁 Re-fetch candles every 5 seconds
+  setTimeout(() => this.subscribeCandles(), 5000);
+}
 
   /* ================= TRADING LOGIC ================= */
 
