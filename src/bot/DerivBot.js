@@ -13,7 +13,7 @@ export class DerivBot {
     this.user = user;
 
     // ===== STATE =====
-    this.candles = [];
+    this.candles = []; // stores mini-candles for strategy
     this.currentContractId = null;
     this.reconnectTimeout = null;
 
@@ -30,6 +30,9 @@ export class DerivBot {
     this.firstTradeDone = false;
     this.lastTelegramSent = 0;
     this.telegramInterval = 2000;
+
+    // ===== MINI-CANDLE BUILDING =====
+    this.tickBuffer = []; // buffer to collect ticks within 1 minute
 
     // ===== DEFAULT MARKET =====
     if (!this.user.market) {
@@ -112,15 +115,19 @@ export class DerivBot {
 
       case 'history':
         console.log(`[${this.user.userId}] 📊 History received: ${data.history?.length}`);
-        this.candles = data.history || [];
+        // Convert history to candle format if needed
+        this.candles = data.history.map(h => ({
+          open: h.open,
+          close: h.close,
+          high: h.high,
+          low: h.low,
+          epoch: h.epoch
+        })) || [];
         this.tryTrade();
         break;
 
       case 'tick':
-        console.log(`[${this.user.userId}] 📊 Tick: ${data.tick?.quote}`);
-        this.candles.push({ close: data.tick.quote, epoch: data.tick.epoch });
-        if (this.candles.length > SETTINGS.CANDLE_COUNT) this.candles.shift();
-        this.tryTrade();
+        this.handleTick(data.tick);
         break;
 
       case 'buy':
@@ -139,6 +146,37 @@ export class DerivBot {
     }
   }
 
+  /* ================= TICK HANDLER & MINI-CANDLES ================= */
+  handleTick(tick) {
+    if (!tick?.quote || !tick?.epoch) return;
+
+    // Add tick to buffer
+    this.tickBuffer.push(tick);
+
+    // Check if 1 minute passed since first tick in buffer
+    const firstTick = this.tickBuffer[0];
+    if (tick.epoch - firstTick.epoch >= 60) {
+      const miniCandle = {
+        open: firstTick.quote,
+        close: tick.quote,
+        high: Math.max(...this.tickBuffer.map(t => t.quote)),
+        low: Math.min(...this.tickBuffer.map(t => t.quote)),
+        epoch: tick.epoch
+      };
+
+      this.candles.push(miniCandle);
+      if (this.candles.length > SETTINGS.CANDLE_COUNT) this.candles.shift();
+
+      // Reset tick buffer
+      this.tickBuffer = [];
+
+      console.log(`[${this.user.userId}] 📊 Mini-candle built: O:${miniCandle.open} H:${miniCandle.high} L:${miniCandle.low} C:${miniCandle.close}`);
+
+      // Attempt trade
+      this.tryTrade();
+    }
+  }
+
   /* ================= BALANCE ================= */
   handleBalance(balance) {
     console.log(`[${this.user.userId}] 💰 Balance: ${balance}`);
@@ -153,7 +191,7 @@ export class DerivBot {
 
     this.user.active = true;
 
-    if (this.candles.length >= 10 && !this.firstTradeDone) {
+    if (this.candles.length >= 3 && !this.firstTradeDone) {
       console.log(`[${this.user.userId}] 🔥 Force first trade`);
       this.tryTrade(true);
     }
