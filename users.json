@@ -3,7 +3,7 @@
     {
       "userId": "user_001",
       "apiToken": "ENV:DERIV_API_TOKEN",
-      "market": "R_75",
+      "symbol": "R_50",
       "active": true,
       "accountType": "demo"
     }
