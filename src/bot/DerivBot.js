@@ -13,7 +13,7 @@ export class DerivBot {
     this.user = user;
 
     // ===== STATE =====
-    this.candles = []; // stores mini-candles for strategy
+    this.candles = [];
     this.currentContractId = null;
     this.reconnectTimeout = null;
 
@@ -32,7 +32,14 @@ export class DerivBot {
     this.telegramInterval = 2000;
 
     // ===== MINI-CANDLE BUILDING =====
-    this.tickBuffer = []; // buffer to collect ticks within 1 minute
+    this.tickBuffer = [];
+
+    // ===== CONTINUOUS TRADING LOOP =====
+    this.tradeLoop = null;
+
+    // ===== TRADE RATE LIMITER =====
+    this.tradeTimestamps = []; // timestamps of last trades
+    this.MAX_TRADES_PER_MIN = 10;
 
     // ===== DEFAULT MARKET =====
     if (!this.user.market) {
@@ -49,6 +56,7 @@ export class DerivBot {
     this.user.ws.on('open', () => {
       console.log(`[${this.user.userId}] ✅ Connected`);
       this.authorize();
+      this.startTradeLoop();
     });
 
     this.user.ws.on('message', msg => {
@@ -110,20 +118,18 @@ export class DerivBot {
         break;
 
       case 'balance':
-        this.handleBalance(data.balance.balance);
+        this.handleBalance(data.balance?.balance);
         break;
 
       case 'history':
-        console.log(`[${this.user.userId}] 📊 History received: ${data.history?.length}`);
-        // Convert history to candle format if needed
-        this.candles = data.history.map(h => ({
+        this.candles = (data.history || []).map(h => ({
           open: h.open,
           close: h.close,
           high: h.high,
           low: h.low,
           epoch: h.epoch
-        })) || [];
-        this.tryTrade();
+        }));
+        console.log(`[${this.user.userId}] 📊 History loaded: ${this.candles.length} candles`);
         break;
 
       case 'tick':
@@ -146,14 +152,12 @@ export class DerivBot {
     }
   }
 
-  /* ================= TICK HANDLER & MINI-CANDLES ================= */
+  /* ================= MINI-CANDLE BUILDER ================= */
   handleTick(tick) {
     if (!tick?.quote || !tick?.epoch) return;
 
-    // Add tick to buffer
     this.tickBuffer.push(tick);
 
-    // Check if 1 minute passed since first tick in buffer
     const firstTick = this.tickBuffer[0];
     if (tick.epoch - firstTick.epoch >= 60) {
       const miniCandle = {
@@ -167,34 +171,21 @@ export class DerivBot {
       this.candles.push(miniCandle);
       if (this.candles.length > SETTINGS.CANDLE_COUNT) this.candles.shift();
 
-      // Reset tick buffer
       this.tickBuffer = [];
 
       console.log(`[${this.user.userId}] 📊 Mini-candle built: O:${miniCandle.open} H:${miniCandle.high} L:${miniCandle.low} C:${miniCandle.close}`);
-
-      // Attempt trade
-      this.tryTrade();
     }
   }
 
   /* ================= BALANCE ================= */
   handleBalance(balance) {
+    if (!balance) return;
     console.log(`[${this.user.userId}] 💰 Balance: ${balance}`);
 
-    if (!this.user.startBalance) {
-      this.user.startBalance = balance;
-      this.user.maxBalance = balance;
-    }
-
+    if (!this.user.startBalance) this.user.startBalance = balance;
     this.user.currentBalance = balance;
     if (balance > this.user.maxBalance) this.user.maxBalance = balance;
-
     this.user.active = true;
-
-    if (this.candles.length >= 3 && !this.firstTradeDone) {
-      console.log(`[${this.user.userId}] 🔥 Force first trade`);
-      this.tryTrade(true);
-    }
   }
 
   subscribeBalance() {
@@ -203,14 +194,10 @@ export class DerivBot {
 
   /* ================= CANDLES ================= */
   subscribeCandles() {
-    if (!this.user.market) {
-      console.error(`[${this.user.userId}] ❌ Market not set, cannot subscribe candles`);
-      return;
-    }
+    if (!this.user.market) return console.error(`[${this.user.userId}] ❌ Market not set`);
 
     console.log(`[${this.user.userId}] 📡 Subscribing candles for market: ${this.user.market}`);
 
-    // Get recent candle history
     this.send({
       ticks_history: this.user.market,
       style: 'candles',
@@ -218,31 +205,47 @@ export class DerivBot {
       count: SETTINGS.CANDLE_COUNT
     });
 
-    // Subscribe to live ticks for updates
     this.send({
       ticks: this.user.market,
       subscribe: 1
     });
   }
 
+  /* ================= CONTINUOUS TRADING LOOP ================= */
+  startTradeLoop() {
+    if (this.tradeLoop) return;
+    this.tradeLoop = setInterval(() => {
+      if (!this.user.inTrade && this.user.active && canTrade(this.user)) {
+        this.tryTrade();
+      }
+    }, 1000);
+  }
+
+  /* ================= RATE-LIMIT CHECK ================= */
+  canTradeNow() {
+    const now = Date.now();
+
+    // Remove timestamps older than 60 seconds
+    this.tradeTimestamps = this.tradeTimestamps.filter(ts => now - ts < 60000);
+
+    if (this.tradeTimestamps.length >= this.MAX_TRADES_PER_MIN) return false;
+
+    this.tradeTimestamps.push(now);
+    return true;
+  }
+
   /* ================= TRADING LOGIC ================= */
   tryTrade(force = false) {
-    console.log(`[DEBUG] tryTrade → active: ${this.user.active}, inTrade: ${this.user.inTrade}, candles: ${this.candles.length}, force: ${force}`);
-
-    if (!this.user.active) return;
-    if (this.user.inTrade) return;
-    if (!canTrade(this.user)) return;
+    if (!this.user.active || this.user.inTrade) return;
+    if (!this.canTradeNow()) return; // rate-limiting
 
     const limits = checkLimits(this.user);
-    if (limits !== 'OK') {
-      console.log(`[DEBUG] ❌ Limit hit: ${limits}`);
-      return;
-    }
+    if (limits !== 'OK') return;
 
     let direction = decideTradeDirection(this.candles);
-    if (!direction && force) {
+    if (!direction && force && !this.firstTradeDone) {
       direction = 'CALL';
-      console.log(`[DEBUG] 🔥 Forced CALL trade`);
+      console.log(`[DEBUG] 🔥 Forced first CALL trade`);
     }
     if (!direction) return;
 
@@ -283,7 +286,7 @@ export class DerivBot {
   }
 
   handleContractUpdate(contract) {
-    if (!contract.is_sold) return;
+    if (!contract?.is_sold) return;
 
     const profit = Number(contract.profit);
     this.user.inTrade = false;
@@ -303,7 +306,5 @@ export class DerivBot {
       profit,
       balance: this.user.currentBalance
     });
-
-    setTimeout(() => this.tryTrade(), 1000);
   }
 }
