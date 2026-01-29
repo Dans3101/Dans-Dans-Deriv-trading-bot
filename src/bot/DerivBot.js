@@ -12,36 +12,29 @@ export class DerivBot {
   constructor(user) {
     this.user = user;
 
-    // ===== USER STATE =====
+    // ===== STATE =====
+    this.candles = [];
+    this.currentContractId = null;
+    this.reconnectTimeout = null;
+
     this.user.active = false;
     this.user.inTrade = false;
     this.user.startBalance = 0;
     this.user.currentBalance = 0;
     this.user.maxBalance = 0;
     this.user.tradesToday = 0;
-
-    // ===== MARTINGALE STATE =====
     this.user.lastTradeResult = null;
     this.user.martingaleStep = 0;
     this.user.baseStake = null;
 
-    // ===== FIRST TRADE FLAG =====
     this.firstTradeDone = false;
-
-    // ===== TELEGRAM RATE LIMIT =====
     this.lastTelegramSent = 0;
     this.telegramInterval = 2000;
 
-    // ===== OTHER STATE =====
-    this.candles = [];
-    this.currentContractId = null;
-    this.reconnectTimeout = null;
-
-    // ===== MARKET CHECK =====
+    // ===== DEFAULT MARKET =====
     if (!this.user.market) {
-      console.error(`[${this.user.userId}] ❌ Market not set in user object!`);
-    } else {
-      console.log(`[${this.user.userId}] Market set to: ${this.user.market}`);
+      this.user.market = 'R_50';
+      console.log(`[${this.user.userId}] Market set to default: ${this.user.market}`);
     }
   }
 
@@ -117,9 +110,16 @@ export class DerivBot {
         this.handleBalance(data.balance.balance);
         break;
 
-      case 'candles':
-        console.log(`[${this.user.userId}] 📊 Candles received: ${data.candles?.length}`);
-        this.candles = data.candles || [];
+      case 'history':
+        console.log(`[${this.user.userId}] 📊 History received: ${data.history?.length}`);
+        this.candles = data.history || [];
+        this.tryTrade();
+        break;
+
+      case 'tick':
+        console.log(`[${this.user.userId}] 📊 Tick: ${data.tick?.quote}`);
+        this.candles.push({ close: data.tick.quote, epoch: data.tick.epoch });
+        if (this.candles.length > SETTINGS.CANDLE_COUNT) this.candles.shift();
         this.tryTrade();
         break;
 
@@ -134,7 +134,7 @@ export class DerivBot {
         break;
 
       default:
-        console.log(`[${this.user.userId}] 📨 Unknown message type`, data.msg_type);
+        console.log(`[${this.user.userId}] 📨 Unknown message type:`, data.msg_type);
         break;
     }
   }
@@ -149,13 +149,10 @@ export class DerivBot {
     }
 
     this.user.currentBalance = balance;
-    if (balance > this.user.maxBalance) {
-      this.user.maxBalance = balance;
-    }
+    if (balance > this.user.maxBalance) this.user.maxBalance = balance;
 
     this.user.active = true;
 
-    // FORCE FIRST TRADE WHEN READY
     if (this.candles.length >= 10 && !this.firstTradeDone) {
       console.log(`[${this.user.userId}] 🔥 Force first trade`);
       this.tryTrade(true);
@@ -175,36 +172,28 @@ export class DerivBot {
 
     console.log(`[${this.user.userId}] 📡 Subscribing candles for market: ${this.user.market}`);
 
+    // Get recent candle history
     this.send({
       ticks_history: this.user.market,
       style: 'candles',
       granularity: SETTINGS.CANDLE_GRANULARITY,
-      count: SETTINGS.CANDLE_COUNT,
-      subscribe: 1
+      count: SETTINGS.CANDLE_COUNT
     });
 
-    // Re-fetch candles every 5 seconds
-    setTimeout(() => this.subscribeCandles(), 5000);
+    // Subscribe to live ticks for updates
+    this.send({
+      ticks: this.user.market,
+      subscribe: 1
+    });
   }
 
   /* ================= TRADING LOGIC ================= */
   tryTrade(force = false) {
     console.log(`[DEBUG] tryTrade → active: ${this.user.active}, inTrade: ${this.user.inTrade}, candles: ${this.candles.length}, force: ${force}`);
 
-    if (!this.user.active) {
-      console.log(`[DEBUG] ❌ User not active`);
-      return;
-    }
-
-    if (this.user.inTrade) {
-      console.log(`[DEBUG] ❌ Already in trade`);
-      return;
-    }
-
-    if (!canTrade(this.user)) {
-      console.log(`[DEBUG] ❌ Blocked by PaymentGuard`);
-      return;
-    }
+    if (!this.user.active) return;
+    if (this.user.inTrade) return;
+    if (!canTrade(this.user)) return;
 
     const limits = checkLimits(this.user);
     if (limits !== 'OK') {
@@ -213,32 +202,20 @@ export class DerivBot {
     }
 
     let direction = decideTradeDirection(this.candles);
-    console.log(`[DEBUG] Strategy direction: ${direction}`);
-
     if (!direction && force) {
       direction = 'CALL';
       console.log(`[DEBUG] 🔥 Forced CALL trade`);
     }
-
-    if (!direction) {
-      console.log(`[DEBUG] ❌ No trade signal`);
-      return;
-    }
+    if (!direction) return;
 
     const stake = calculateStake(this.user);
-    console.log(`[DEBUG] Stake: ${stake}`);
-
-    if (!stake || stake <= 0) {
-      console.log(`[DEBUG] ❌ Invalid stake`);
-      return;
-    }
+    if (!stake || stake <= 0) return;
 
     this.user.inTrade = true;
     this.user.tradesToday++;
     this.firstTradeDone = true;
 
     console.log(`[TRADE] 🚀 ${direction} $${stake}`);
-
     this.safeTelegram(`🚀 ${this.user.userId} | ${direction} | $${stake}`);
 
     this.send({
@@ -278,7 +255,6 @@ export class DerivBot {
     this.user.lastTradeResult = result;
 
     console.log(`[RESULT] ${result} | Profit: ${profit}`);
-
     this.safeTelegram(`[RESULT] ${this.user.userId} | ${result} | Profit: ${profit}`);
 
     logTrade({
@@ -290,7 +266,6 @@ export class DerivBot {
       balance: this.user.currentBalance
     });
 
-    // Continue trading after contract closes
     setTimeout(() => this.tryTrade(), 1000);
   }
 }
