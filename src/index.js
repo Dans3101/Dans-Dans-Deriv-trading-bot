@@ -40,6 +40,7 @@ export const bots = new Map(); // userId → DerivBot instance
 /* ================= START BOTS ================= */
 async function startBots() {
   console.log('🚀 Starting Deriv bots...');
+
   for (const userData of users) {
     try {
       const apiToken = userData.apiToken?.startsWith('ENV:')
@@ -51,9 +52,21 @@ async function startBots() {
         continue;
       }
 
+      // Ensure market is set
+      if (!userData.market) {
+        userData.market = 'R_50';
+        console.log(`[${userData.userId}] Market set to default: ${userData.market}`);
+      }
+
       const session = new UserSession({ ...userData, apiToken });
       const bot = new DerivBot(session);
-      await bot.connect();
+
+      // Await bot connection to ensure proper startup
+      await new Promise(resolve => {
+        bot.connect();
+        bot.user.ws.on('open', resolve);
+      });
+
       bots.set(userData.userId, bot);
       console.log(`✅ Bot started for ${userData.userId}`);
     } catch (err) {
@@ -61,7 +74,7 @@ async function startBots() {
     }
   }
 
-  // Start Telegram once
+  // Start Telegram Admin only once
   if (!global.telegramStarted) {
     global.telegramStarted = true;
     console.log('🤖 Starting Telegram Admin...');
@@ -69,5 +82,5 @@ async function startBots() {
   }
 }
 
-// Delay slightly to allow server to start
+// Delay slightly to allow server to fully initialize
 setTimeout(startBots, 3000);
