@@ -8,7 +8,7 @@ import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
 import { logTrade } from '../utils/tradeLogger.js';
 
-/* ================= ACCUMULATOR BOT CLASS ================= */
+/* ================= ACCUMULATOR BOT ================= */
 class AccumulatorBot {
   constructor(user) {
     this.user = user;
@@ -16,6 +16,10 @@ class AccumulatorBot {
     this.currentContractId = null;
     this.lastTelegramSent = 0;
     this.telegramInterval = 2000;
+
+    this.baseStake = 5; // starting stake
+    this.lastProfit = null;
+    this.cooldown = false;
   }
 
   safeTelegram(message) {
@@ -25,26 +29,31 @@ class AccumulatorBot {
     sendTelegramMessage(message);
   }
 
-  placeTrade(amount, duration = 1) {
-    if (!this.user.active || this.inTrade || !canTrade(this.user)) return;
+  placeTrade() {
+    if (!this.user.active || this.inTrade || !canTrade(this.user) || this.cooldown) return;
 
     const limits = checkLimits(this.user);
     if (limits !== 'OK') return;
 
+    let stake = this.baseStake;
+
+    // Increase stake after last win
+    if (this.lastProfit > 0) stake = +(stake * 1.2).toFixed(2);
+
     this.inTrade = true;
 
-    console.log(`[ACC TRADE] 🚀 $${amount}`);
-    this.safeTelegram(`🚀 ${this.user.userId} | Accumulator | $${amount}`);
+    console.log(`[ACC TRADE] 🚀 $${stake}`);
+    this.safeTelegram(`🚀 ${this.user.userId} | Accumulator | $${stake}`);
 
     this.user.ws.send(JSON.stringify({
       buy: 1,
-      price: amount,
+      price: stake,
       parameters: {
-        amount,
+        amount: stake,
         basis: 'stake',
         contract_type: 'ACCU', // Accumulator type
         currency: 'USD',
-        duration,
+        duration: 1,
         duration_unit: 'm',
         symbol: this.user.market
       }
@@ -58,8 +67,15 @@ class AccumulatorBot {
     this.inTrade = false;
     this.currentContractId = null;
 
-    const result = profit >= 0 ? 'WIN' : 'LOSS';
+    // Cooldown if loss
+    if (profit < 0) {
+      this.cooldown = true;
+      setTimeout(() => this.cooldown = false, 2 * 60 * 1000); // 2 min cooldown
+    }
 
+    this.lastProfit = profit;
+
+    const result = profit >= 0 ? 'WIN' : 'LOSS';
     console.log(`[ACC RESULT] ${result} | Profit: ${profit}`);
     this.safeTelegram(`[ACC RESULT] ${this.user.userId} | ${result} | Profit: ${profit}`);
 
@@ -74,7 +90,7 @@ class AccumulatorBot {
   }
 }
 
-/* ================= DERIV BOT CLASS ================= */
+/* ================= DERIV BOT ================= */
 export class DerivBot {
   constructor(user) {
     this.user = user;
@@ -178,6 +194,7 @@ export class DerivBot {
     sendTelegramMessage(message);
   }
 
+  /* ================= MESSAGE HANDLER ================= */
   handleMessage(data) {
     switch (data.msg_type) {
       case 'authorize':
@@ -248,6 +265,9 @@ export class DerivBot {
       this.tickBuffer = [];
 
       console.log(`[${this.user.userId}] 📊 Mini-candle built: O:${miniCandle.open} H:${miniCandle.high} L:${miniCandle.low} C:${miniCandle.close}`);
+
+      // Optional: Try a trade immediately after candle
+      this.tryTrade();
     }
   }
 
@@ -296,13 +316,10 @@ export class DerivBot {
   }
 
   startAccumulatorLoop() {
-    // Place a small accumulator trade every 5 minutes
+    // Accumulator trade every 3–5 minutes
     setInterval(() => {
-      if (this.user.active) {
-        const stake = 5; // Adjust stake for accumulator
-        this.accBot.placeTrade(stake);
-      }
-    }, 300000); // every 5 min
+      if (this.user.active) this.accBot.placeTrade();
+    }, 3 * 60 * 1000 + Math.random() * 2 * 60 * 1000);
   }
 
   canTradeNow() {
