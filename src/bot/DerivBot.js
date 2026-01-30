@@ -8,6 +8,73 @@ import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
 import { logTrade } from '../utils/tradeLogger.js';
 
+/* ================= ACCUMULATOR BOT CLASS ================= */
+class AccumulatorBot {
+  constructor(user) {
+    this.user = user;
+    this.inTrade = false;
+    this.currentContractId = null;
+    this.lastTelegramSent = 0;
+    this.telegramInterval = 2000;
+  }
+
+  safeTelegram(message) {
+    const now = Date.now();
+    if (now - this.lastTelegramSent < this.telegramInterval) return;
+    this.lastTelegramSent = now;
+    sendTelegramMessage(message);
+  }
+
+  placeTrade(amount, duration = 1) {
+    if (!this.user.active || this.inTrade || !canTrade(this.user)) return;
+
+    const limits = checkLimits(this.user);
+    if (limits !== 'OK') return;
+
+    this.inTrade = true;
+
+    console.log(`[ACC TRADE] 🚀 $${amount}`);
+    this.safeTelegram(`🚀 ${this.user.userId} | Accumulator | $${amount}`);
+
+    this.user.ws.send(JSON.stringify({
+      buy: 1,
+      price: amount,
+      parameters: {
+        amount,
+        basis: 'stake',
+        contract_type: 'ACCU', // Accumulator type
+        currency: 'USD',
+        duration,
+        duration_unit: 'm',
+        symbol: this.user.market
+      }
+    }));
+  }
+
+  handleContractUpdate(contract) {
+    if (!contract?.is_sold) return;
+
+    const profit = Number(contract.profit);
+    this.inTrade = false;
+    this.currentContractId = null;
+
+    const result = profit >= 0 ? 'WIN' : 'LOSS';
+
+    console.log(`[ACC RESULT] ${result} | Profit: ${profit}`);
+    this.safeTelegram(`[ACC RESULT] ${this.user.userId} | ${result} | Profit: ${profit}`);
+
+    logTrade({
+      userId: this.user.userId,
+      market: this.user.market,
+      direction: 'ACCUMULATOR',
+      stake: contract.buy_price || 0,
+      profit,
+      balance: this.user.currentBalance
+    });
+  }
+}
+
+/* ================= DERIV BOT CLASS ================= */
 export class DerivBot {
   constructor(user) {
     this.user = user;
@@ -38,8 +105,11 @@ export class DerivBot {
     this.tradeLoop = null;
 
     // ===== TRADE RATE LIMITER =====
-    this.tradeTimestamps = []; // timestamps of last trades
+    this.tradeTimestamps = [];
     this.MAX_TRADES_PER_MIN = 10;
+
+    // ===== ACCUMULATOR BOT =====
+    this.accBot = new AccumulatorBot(this.user);
 
     // ===== DEFAULT MARKET =====
     if (!this.user.market) {
@@ -57,6 +127,7 @@ export class DerivBot {
       console.log(`[${this.user.userId}] ✅ Connected`);
       this.authorize();
       this.startTradeLoop();
+      this.startAccumulatorLoop();
     });
 
     this.user.ws.on('message', msg => {
@@ -100,7 +171,6 @@ export class DerivBot {
     this.send({ authorize: this.user.apiToken });
   }
 
-  /* ================= TELEGRAM ================= */
   safeTelegram(message) {
     const now = Date.now();
     if (now - this.lastTelegramSent < this.telegramInterval) return;
@@ -108,7 +178,6 @@ export class DerivBot {
     sendTelegramMessage(message);
   }
 
-  /* ================= MESSAGE HANDLER ================= */
   handleMessage(data) {
     switch (data.msg_type) {
       case 'authorize':
@@ -143,7 +212,12 @@ export class DerivBot {
         break;
 
       case 'proposal_open_contract':
-        this.handleContractUpdate(data.proposal_open_contract);
+        // Accumulator contract update
+        if (data.proposal_open_contract.contract_type === 'ACCU') {
+          this.accBot.handleContractUpdate(data.proposal_open_contract);
+        } else {
+          this.handleContractUpdate(data.proposal_open_contract);
+        }
         break;
 
       default:
@@ -192,7 +266,6 @@ export class DerivBot {
     this.send({ balance: 1, subscribe: 1 });
   }
 
-  /* ================= CANDLES ================= */
   subscribeCandles() {
     if (!this.user.market) return console.error(`[${this.user.userId}] ❌ Market not set`);
 
@@ -214,6 +287,7 @@ export class DerivBot {
   /* ================= CONTINUOUS TRADING LOOP ================= */
   startTradeLoop() {
     if (this.tradeLoop) return;
+
     this.tradeLoop = setInterval(() => {
       if (!this.user.inTrade && this.user.active && canTrade(this.user)) {
         this.tryTrade();
@@ -221,23 +295,27 @@ export class DerivBot {
     }, 1000);
   }
 
-  /* ================= RATE-LIMIT CHECK ================= */
+  startAccumulatorLoop() {
+    // Place a small accumulator trade every 5 minutes
+    setInterval(() => {
+      if (this.user.active) {
+        const stake = 5; // Adjust stake for accumulator
+        this.accBot.placeTrade(stake);
+      }
+    }, 300000); // every 5 min
+  }
+
   canTradeNow() {
     const now = Date.now();
-
-    // Remove timestamps older than 60 seconds
     this.tradeTimestamps = this.tradeTimestamps.filter(ts => now - ts < 60000);
-
     if (this.tradeTimestamps.length >= this.MAX_TRADES_PER_MIN) return false;
-
     this.tradeTimestamps.push(now);
     return true;
   }
 
-  /* ================= TRADING LOGIC ================= */
   tryTrade(force = false) {
     if (!this.user.active || this.user.inTrade) return;
-    if (!this.canTradeNow()) return; // rate-limiting
+    if (!this.canTradeNow()) return;
 
     const limits = checkLimits(this.user);
     if (limits !== 'OK') return;
@@ -274,7 +352,6 @@ export class DerivBot {
     });
   }
 
-  /* ================= CONTRACT ================= */
   subscribeContract() {
     if (!this.currentContractId) return;
 
