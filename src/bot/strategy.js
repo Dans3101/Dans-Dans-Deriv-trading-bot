@@ -1,8 +1,8 @@
 // src/bot/strategy.js
 
 /**
- * R_50 High-Accuracy Momentum Continuation Strategy (1m)
- * Optimized to reduce false entries and overtrading
+ * Balanced Momentum Strategy for R_50 (1m)
+ * Trades consistently while filtering bad noise
  */
 
 function movePercent(candle) {
@@ -17,58 +17,36 @@ function bodySize(candle) {
 }
 
 export function decideTradeDirection(candles) {
-  if (!Array.isArray(candles) || candles.length < 6) return null;
+  if (!Array.isArray(candles) || candles.length < 4) return null;
 
-  // Last 6 candles give cleaner R_50 structure
-  const c = candles.slice(-6);
-
+  const c = candles.slice(-4);
   const moves = c.map(movePercent);
-  if (moves.some(m => m === null)) return null;
-
   const bodies = c.map(bodySize);
 
-  /* ================= VOLATILITY FILTER ================= */
-  const avgBody =
-    bodies.reduce((a, b) => a + b, 0) / bodies.length;
+  if (moves.some(m => m === null)) return null;
 
-  // Market must be moving
-  if (avgBody < 0.15) return null;
+  /* ========= BASIC VOLATILITY FILTER ========= */
+  const avgBody = bodies.reduce((a, b) => a + b, 0) / bodies.length;
+  if (avgBody < 0.08) return null; // relaxed (was too strict)
 
-  /* ================= TREND STRENGTH ================= */
-  const trendMoves = moves.slice(0, 3);
+  /* ========= MOMENTUM COUNT ========= */
+  const up = moves.filter(m => m > 0.015).length;
+  const down = moves.filter(m => m < -0.015).length;
 
-  const strongBullTrend = trendMoves.every(m => m > 0.04);
-  const strongBearTrend = trendMoves.every(m => m < -0.04);
+  /* ========= LAST CANDLE CONFIRMATION ========= */
+  const lastMove = moves[3];
+  const lastBody = bodies[3];
 
-  if (!strongBullTrend && !strongBearTrend) return null;
+  if (lastBody < avgBody * 0.6) return null;
 
-  /* ================= CONTROLLED PULLBACK ================= */
-  const pullback1 = moves[3];
-  const pullback2 = moves[4];
-
-  // Pullback must be small and opposite
-  if (strongBullTrend) {
-    if (!(pullback1 < 0 && pullback2 <= 0)) return null;
-    if (Math.abs(pullback1) > 0.06 || Math.abs(pullback2) > 0.06) return null;
-  }
-
-  if (strongBearTrend) {
-    if (!(pullback1 > 0 && pullback2 >= 0)) return null;
-    if (pullback1 > 0.06 || pullback2 > 0.06) return null;
-  }
-
-  /* ================= ENTRY CONFIRMATION ================= */
-  const trigger = moves[5];
-  const triggerBody = bodies[5];
-
-  // Must break with strength
-  if (triggerBody < avgBody * 0.9) return null;
-
-  if (strongBullTrend && trigger > 0.05) {
+  /* ========= TRADE LOGIC ========= */
+  // Bullish momentum
+  if (up >= 3 && lastMove > 0) {
     return 'CALL';
   }
 
-  if (strongBearTrend && trigger < -0.05) {
+  // Bearish momentum
+  if (down >= 3 && lastMove < 0) {
     return 'PUT';
   }
 
