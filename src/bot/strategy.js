@@ -1,8 +1,6 @@
-// src/bot/strategy.js
-
 /**
- * Balanced Momentum Strategy for R_50 (1m)
- * Filters low-volatility noise and confirms momentum before trading
+ * Enhanced Momentum Strategy for R_50 (1m)
+ * More aggressive while keeping noise filtering
  */
 
 function movePercent(candle) {
@@ -20,7 +18,7 @@ function bodySize(candle) {
 }
 
 export function decideTradeDirection(candles) {
-  if (!Array.isArray(candles) || candles.length < 4) return null;
+  if (!Array.isArray(candles) || candles.length < 3) return null;
 
   const recent = candles.slice(-4);
   const moves = recent.map(movePercent);
@@ -28,28 +26,31 @@ export function decideTradeDirection(candles) {
 
   if (moves.some(m => m === null) || bodies.some(b => b === null)) return null;
 
-  /* ========= BASIC VOLATILITY FILTER ========= */
+  /* ========= AVG BODY FILTER ========= */
   const avgBody = bodies.reduce((a, b) => a + b, 0) / bodies.length;
-  if (avgBody < 0.08) return null; // avoid flat/noisy markets
+  if (avgBody < 0.05) return null; // slightly more permissive
 
   /* ========= MOMENTUM COUNT ========= */
-  const upCount = moves.filter(m => m > 0.015).length;
-  const downCount = moves.filter(m => m < -0.015).length;
+  const upCount = moves.filter(m => m > 0.01).length;
+  const downCount = moves.filter(m => m < -0.01).length;
 
   /* ========= LAST CANDLE CONFIRMATION ========= */
   const lastMove = moves[moves.length - 1];
   const lastBody = bodies[bodies.length - 1];
+  if (lastBody < avgBody * 0.5) return null; // ignore very weak candle
 
-  if (lastBody < avgBody * 0.6) return null; // weak candle, skip
+  /* ========= TREND CONFIRMATION ========= */
+  const prev3 = moves.slice(-4, -1);
+  const upTrend = prev3.every(m => m > 0);
+  const downTrend = prev3.every(m => m < 0);
 
   /* ========= TRADE LOGIC ========= */
-  if (upCount >= 3 && lastMove > 0) {
-    return 'CALL'; // bullish momentum
-  }
+  if (upCount >= 2 && lastMove > 0 && upTrend) return 'CALL';
+  if (downCount >= 2 && lastMove < 0 && downTrend) return 'PUT';
 
-  if (downCount >= 3 && lastMove < 0) {
-    return 'PUT'; // bearish momentum
-  }
+  /* ========= OPTIONAL REVERSAL (small pullback) ========= */
+  if (upCount === 2 && lastMove < 0 && downTrend) return 'PUT';
+  if (downCount === 2 && lastMove > 0 && upTrend) return 'CALL';
 
-  return null;
+  return null; // no confident signal
 }
