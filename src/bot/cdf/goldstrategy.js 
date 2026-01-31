@@ -1,1 +1,73 @@
-1
+/**
+ * Gold/USD Trading Strategy (CFD)
+ * Market: GOLDUSD (Deriv Commodities)
+ *
+ * Strategy type:
+ * - Trend + Momentum confirmation
+ * - Volatility filtered (Gold moves fast)
+ * - Designed to hit small, consistent profits ($1+)
+ *
+ * Returns:
+ *  - 'BUY'
+ *  - 'SELL'
+ *  - null (no trade)
+ */
+
+/* ================= HELPERS ================= */
+
+function candleBody(candle) {
+  return Math.abs(Number(candle.close) - Number(candle.open));
+}
+
+function candleDirection(candle) {
+  return Number(candle.close) > Number(candle.open) ? 'UP' : 'DOWN';
+}
+
+function average(arr) {
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
+}
+
+/* ================= MAIN STRATEGY ================= */
+
+export function decideGoldTrade(candles) {
+  if (!Array.isArray(candles) || candles.length < 6) return null;
+
+  const recent = candles.slice(-6);
+
+  /* ================= VOLATILITY FILTER ================= */
+  const bodies = recent.map(candleBody);
+  const avgBody = average(bodies);
+
+  if (avgBody < 0.15) {
+    // Market too flat → skip
+    return null;
+  }
+
+  /* ================= TREND DETECTION ================= */
+  const directions = recent.map(candleDirection);
+  const upCount = directions.filter(d => d === 'UP').length;
+  const downCount = directions.filter(d => d === 'DOWN').length;
+
+  /* ================= MOMENTUM CONFIRMATION ================= */
+  const lastCandle = recent[recent.length - 1];
+  const lastBody = candleBody(lastCandle);
+
+  if (lastBody < avgBody * 0.7) {
+    // Weak momentum candle
+    return null;
+  }
+
+  /* ================= TRADE LOGIC ================= */
+
+  // Strong bullish trend
+  if (upCount >= 4 && lastCandle.close > lastCandle.open) {
+    return 'BUY';
+  }
+
+  // Strong bearish trend
+  if (downCount >= 4 && lastCandle.close < lastCandle.open) {
+    return 'SELL';
+  }
+
+  return null;
+}
