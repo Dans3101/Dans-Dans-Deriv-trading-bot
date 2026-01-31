@@ -2,12 +2,24 @@
 
 import WebSocket from 'ws';
 import { DERIV_WS } from '../config/deriv.js';
-import { decideGoldTrade } from './goldStrategy.js';
 import { sendTelegramMessage } from '../notifications/telegram.js';
+import { canTrade } from '../middleware/paymentGuard.js';
+
+import {
+  calculateGoldStake,
+  canTradeGold,
+  handleGoldTradeResult,
+  shouldCloseGoldTrade
+} from './goldRiskManager.js';
+
+import { decideGoldTrade } from './goldStrategy.js';
 
 /**
- * DERIV GOLD/USD CFD BOT
- * Market: GOLDUSD (Deriv commodities)
+ * =========================
+ * DERIV GOLD BOT (Gold/USD)
+ * =========================
+ * Commodity trading bot
+ * Independent from Binary & Accumulator
  */
 
 export class DerivGoldBot {
@@ -16,19 +28,14 @@ export class DerivGoldBot {
 
     this.ws = null;
     this.candles = [];
+    this.currentContractId = null;
     this.inTrade = false;
-    this.contractId = null;
 
     this.lastTelegramSent = 0;
-    this.telegramInterval = 3000;
+    this.telegramInterval = 2000;
 
-    // ===== CONFIG =====
-    this.MARKET = 'GOLDUSD';
-    this.GRANULARITY = 60; // 1 minute candles
-    this.CANDLE_COUNT = 50;
-
-    this.STAKE = 5;        // Trade size
-    this.TAKE_PROFIT = 1; // $1 profit target
+    // Gold symbol (Deriv)
+    this.symbol = 'GOLDUSD';
   }
 
   /* ================= CONNECTION ================= */
@@ -45,15 +52,19 @@ export class DerivGoldBot {
     this.ws.on('message', msg => {
       try {
         this.handleMessage(JSON.parse(msg));
-      } catch (e) {
-        console.error('[GOLD] ❌ JSON error', e.message);
+      } catch (err) {
+        console.error('[GOLD] ❌ JSON error', err.message);
       }
     });
 
     this.ws.on('close', () => {
-      console.log('[GOLD] ❌ Disconnected');
+      console.log('[GOLD] ❌ Disconnected — reconnecting...');
       setTimeout(() => this.connect(), 5000);
     });
+  }
+
+  authorize() {
+    this.send({ authorize: this.user.apiToken });
   }
 
   send(data) {
@@ -62,9 +73,7 @@ export class DerivGoldBot {
     }
   }
 
-  authorize() {
-    this.send({ authorize: this.user.apiToken });
-  }
+  /* ================= TELEGRAM ================= */
 
   safeTelegram(msg) {
     const now = Date.now();
@@ -79,121 +88,117 @@ export class DerivGoldBot {
     switch (data.msg_type) {
       case 'authorize':
         console.log('[GOLD] 🔐 Authorized');
+        this.subscribeBalance();
         this.subscribeCandles();
+        break;
+
+      case 'balance':
+        this.user.currentBalance = data.balance.balance;
         break;
 
       case 'history':
         this.candles = data.history.map(c => ({
-          open: Number(c.open),
-          close: Number(c.close),
-          high: Number(c.high),
-          low: Number(c.low),
+          open: c.open,
+          close: c.close,
+          high: c.high,
+          low: c.low,
           epoch: c.epoch
         }));
-        console.log(`[GOLD] 📊 Loaded ${this.candles.length} candles`);
-        break;
-
-      case 'ohlc':
-        this.handleCandle(data.ohlc);
         break;
 
       case 'buy':
-        this.contractId = data.buy.contract_id;
+        this.currentContractId = data.buy.contract_id;
         this.subscribeContract();
         break;
 
       case 'proposal_open_contract':
-        this.handleContractUpdate(data.proposal_open_contract);
+        this.handleContract(data.proposal_open_contract);
         break;
     }
   }
 
-  /* ================= CANDLES ================= */
+  /* ================= SUBSCRIPTIONS ================= */
+
+  subscribeBalance() {
+    this.send({ balance: 1, subscribe: 1 });
+  }
 
   subscribeCandles() {
     this.send({
-      ticks_history: this.MARKET,
+      ticks_history: this.symbol,
       style: 'candles',
-      granularity: this.GRANULARITY,
-      count: this.CANDLE_COUNT,
+      granularity: 60,
+      count: 50
+    });
+  }
+
+  subscribeContract() {
+    if (!this.currentContractId) return;
+    this.send({
+      proposal_open_contract: 1,
+      contract_id: this.currentContractId,
       subscribe: 1
     });
   }
 
-  handleCandle(candle) {
-    this.candles.push({
-      open: Number(candle.open),
-      close: Number(candle.close),
-      high: Number(candle.high),
-      low: Number(candle.low),
-      epoch: candle.epoch
-    });
-
-    if (this.candles.length > this.CANDLE_COUNT) {
-      this.candles.shift();
-    }
-
-    this.tryTrade();
-  }
-
-  /* ================= TRADING ================= */
+  /* ================= TRADING LOGIC ================= */
 
   tryTrade() {
     if (this.inTrade) return;
-    if (this.candles.length < 20) return;
+    if (!canTrade(this.user)) return;
+    if (!canTradeGold(this.user)) return;
 
-    const signal = decideGoldTrade(this.candles);
-    if (!signal) return;
+    const direction = decideGoldTrade(this.candles);
+    if (!direction) return;
 
-    console.log(`[GOLD TRADE] 🚀 ${signal}`);
-    this.safeTelegram(`🟡 GOLD/USD ${signal}`);
+    const stake = calculateGoldStake(this.user);
+    if (!stake) return;
 
     this.inTrade = true;
 
+    console.log(`[GOLD TRADE] 🚀 ${direction} $${stake}`);
+    this.safeTelegram(`🥇 GOLD/USD | ${direction} | $${stake}`);
+
     this.send({
       buy: 1,
-      price: this.STAKE,
+      price: stake,
       parameters: {
-        amount: this.STAKE,
+        amount: stake,
         basis: 'stake',
-        contract_type: signal === 'BUY' ? 'BUY' : 'SELL',
+        contract_type: direction,
         currency: 'USD',
-        symbol: this.MARKET
+        duration: 5,
+        duration_unit: 'm',
+        symbol: this.symbol
       }
     });
   }
 
-  /* ================= CONTRACT ================= */
+  /* ================= CONTRACT HANDLING ================= */
 
-  subscribeContract() {
-    if (!this.contractId) return;
-
-    this.send({
-      proposal_open_contract: 1,
-      contract_id: this.contractId,
-      subscribe: 1
-    });
-  }
-
-  handleContractUpdate(contract) {
+  handleContract(contract) {
     if (!contract) return;
 
-    const profit = Number(contract.profit || 0);
-
-    // ===== TAKE PROFIT =====
-    if (!contract.is_sold && profit >= this.TAKE_PROFIT) {
+    // Auto-close when profit ≥ $1
+    if (!contract.is_sold && shouldCloseGoldTrade(contract)) {
       this.send({ sell: contract.contract_id, price: 0 });
       return;
     }
 
     if (!contract.is_sold) return;
 
+    const profit = Number(contract.profit);
     this.inTrade = false;
-    this.contractId = null;
+    this.currentContractId = null;
+
+    handleGoldTradeResult(this.user, profit);
 
     const result = profit >= 0 ? 'WIN' : 'LOSS';
 
-    console.log(`[GOLD RESULT] ${result} | ${profit}`);
-    this.safeTelegram(`🟡 GOLD ${result} | $${profit}`);
+    console.log(`[GOLD RESULT] ${result} | Profit: ${profit}`);
+    this.safeTelegram(`🥇 GOLD RESULT | ${result} | $${profit}`);
+
+    // Immediately look for next trade
+    setTimeout(() => this.tryTrade(), 3000);
   }
 }
