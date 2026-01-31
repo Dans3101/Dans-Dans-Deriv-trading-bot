@@ -1,4 +1,4 @@
-// src/bot/goldStrategy.js
+// src/bot/cdf/goldStrategy.js
 
 /**
  * GOLD/USD Strategy (Deriv Commodities)
