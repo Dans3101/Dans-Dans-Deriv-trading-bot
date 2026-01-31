@@ -9,7 +9,8 @@ import {
   calculateGoldStake,
   canTradeGold,
   handleGoldTradeResult,
-  shouldCloseGoldTrade
+  shouldCloseGoldTrade,
+  isMarketOpenGold
 } from './goldRiskManager.js';
 
 import { decideGoldTrade } from './goldStrategy.js';
@@ -18,8 +19,8 @@ import { decideGoldTrade } from './goldStrategy.js';
  * =========================
  * DERIV GOLD BOT (Gold/USD)
  * =========================
- * Commodity trading bot
- * Independent from Binary & Accumulator
+ * Independent commodity bot for Gold/USD
+ * Runs continuously, closes profitable trades ≥ $1
  */
 
 export class DerivGoldBot {
@@ -28,14 +29,15 @@ export class DerivGoldBot {
 
     this.ws = null;
     this.candles = [];
+    this.tickBuffer = [];
     this.currentContractId = null;
     this.inTrade = false;
 
     this.lastTelegramSent = 0;
     this.telegramInterval = 2000;
 
-    // Gold symbol (Deriv)
     this.symbol = 'GOLDUSD';
+    this.tradeLoop = null;
   }
 
   /* ================= CONNECTION ================= */
@@ -45,7 +47,7 @@ export class DerivGoldBot {
     this.ws = new WebSocket(DERIV_WS(appId));
 
     this.ws.on('open', () => {
-      console.log(`[GOLD] ✅ Connected`);
+      console.log('[GOLD] ✅ Connected');
       this.authorize();
     });
 
@@ -90,6 +92,7 @@ export class DerivGoldBot {
         console.log('[GOLD] 🔐 Authorized');
         this.subscribeBalance();
         this.subscribeCandles();
+        this.startTradeLoop();
         break;
 
       case 'balance':
@@ -104,6 +107,10 @@ export class DerivGoldBot {
           low: c.low,
           epoch: c.epoch
         }));
+        break;
+
+      case 'tick':
+        this.handleTick(data.tick);
         break;
 
       case 'buy':
@@ -130,6 +137,8 @@ export class DerivGoldBot {
       granularity: 60,
       count: 50
     });
+
+    this.send({ ticks: this.symbol, subscribe: 1 });
   }
 
   subscribeContract() {
@@ -141,13 +150,46 @@ export class DerivGoldBot {
     });
   }
 
-  /* ================= TRADING LOGIC ================= */
+  /* ================= MINI-CANDLE BUILDER ================= */
+
+  handleTick(tick) {
+    if (!tick?.quote || !tick?.epoch) return;
+
+    this.tickBuffer.push(tick);
+
+    const firstTick = this.tickBuffer[0];
+    if (tick.epoch - firstTick.epoch >= 60) {
+      const miniCandle = {
+        open: firstTick.quote,
+        close: tick.quote,
+        high: Math.max(...this.tickBuffer.map(t => t.quote)),
+        low: Math.min(...this.tickBuffer.map(t => t.quote)),
+        epoch: tick.epoch
+      };
+
+      this.candles.push(miniCandle);
+      if (this.candles.length > 50) this.candles.shift();
+
+      this.tickBuffer = [];
+
+      console.log(`[GOLD] 📊 Mini-candle built: O:${miniCandle.open} H:${miniCandle.high} L:${miniCandle.low} C:${miniCandle.close}`);
+    }
+  }
+
+  /* ================= TRADING LOOP ================= */
+
+  startTradeLoop() {
+    if (this.tradeLoop) return;
+
+    this.tradeLoop = setInterval(() => {
+      if (!isMarketOpenGold()) return; // systemic market check
+      if (!canTrade(this.user)) return;
+      if (!canTradeGold(this.user)) return;
+      if (!this.inTrade) this.tryTrade();
+    }, 5000); // every 5 seconds
+  }
 
   tryTrade() {
-    if (this.inTrade) return;
-    if (!canTrade(this.user)) return;
-    if (!canTradeGold(this.user)) return;
-
     const direction = decideGoldTrade(this.candles);
     if (!direction) return;
 
@@ -179,7 +221,6 @@ export class DerivGoldBot {
   handleContract(contract) {
     if (!contract) return;
 
-    // Auto-close when profit ≥ $1
     if (!contract.is_sold && shouldCloseGoldTrade(contract)) {
       this.send({ sell: contract.contract_id, price: 0 });
       return;
@@ -194,11 +235,9 @@ export class DerivGoldBot {
     handleGoldTradeResult(this.user, profit);
 
     const result = profit >= 0 ? 'WIN' : 'LOSS';
-
     console.log(`[GOLD RESULT] ${result} | Profit: ${profit}`);
     this.safeTelegram(`🥇 GOLD RESULT | ${result} | $${profit}`);
 
-    // Immediately look for next trade
     setTimeout(() => this.tryTrade(), 3000);
   }
 }
