@@ -4,6 +4,20 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
 let bot = null;
 
+/* ===== Helper: Check if Gold/USD market is open =====
+   Deriv Gold/USD generally trades 24/5, but closed on weekends.
+   Returns true if open, false otherwise.
+*/
+function isGoldMarketOpen() {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sunday, 6=Saturday
+
+  // Gold market closed Saturday-Sunday UTC
+  if (day === 6 || day === 0) return false;
+
+  return true;
+}
+
 export function listenTelegramAdmin(bots) {
   if (!TELEGRAM_TOKEN) {
     console.log('⚠️ Telegram admin disabled — missing BOT token.');
@@ -123,8 +137,12 @@ Buttons recommended 👍
         break;
 
       case 'GOLD_ON':
-        [...bots.values()].forEach(b => b.user.enableGold = true);
-        bot.sendMessage(chatId, '🥇 Gold trading ENABLED');
+        if (!isGoldMarketOpen()) {
+          bot.sendMessage(chatId, '🥇 Gold/USD market is currently CLOSED ❌\nTry again when the market opens.');
+        } else {
+          [...bots.values()].forEach(b => b.user.enableGold = true);
+          bot.sendMessage(chatId, '🥇 Gold trading ENABLED ✅');
+        }
         break;
 
       case 'GOLD_OFF':
