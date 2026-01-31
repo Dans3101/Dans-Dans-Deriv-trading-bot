@@ -1,1 +1,121 @@
-1
+// src/bot/goldRiskManager.js
+
+/**
+ * GOLD RISK MANAGER (Gold/USD - Deriv Commodities)
+ * -----------------------------------------------
+ * Purpose:
+ * - Protect capital
+ * - Enforce discipline
+ * - Keep Gold bot profitable & alive long-term
+ *
+ * Gold Rules:
+ * ✔ Close trade when profit ≥ $1
+ * ✔ Stop after consecutive losses
+ * ✔ Dynamic stake sizing
+ * ✔ Daily drawdown protection
+ */
+
+/* ================= CONFIG ================= */
+
+const GOLD_CONFIG = {
+  MIN_STAKE: 1,                 // Minimum stake per trade
+  MAX_STAKE: 50,                // Absolute max stake
+  RISK_PERCENT: 0.01,           // 1% risk per trade
+  DAILY_MAX_LOSS_PERCENT: 0.05, // Stop trading after 5% daily loss
+  MAX_CONSECUTIVE_LOSSES: 3,    // Kill-switch
+  MAX_TRADES_PER_DAY: 20,       // Discipline
+  TARGET_PROFIT: 1              // $1 profit target per trade
+};
+
+/* ================= STATE HELPERS ================= */
+
+function initGoldState(user) {
+  if (!user.gold) {
+    user.gold = {
+      startBalance: null,
+      tradesToday: 0,
+      consecutiveLosses: 0,
+      lastTradeDay: new Date().toDateString()
+    };
+  }
+
+  // Reset daily stats
+  const today = new Date().toDateString();
+  if (user.gold.lastTradeDay !== today) {
+    user.gold.tradesToday = 0;
+    user.gold.consecutiveLosses = 0;
+    user.gold.startBalance = user.currentBalance;
+    user.gold.lastTradeDay = today;
+  }
+}
+
+/* ================= STAKE CALCULATION ================= */
+
+export function calculateGoldStake(user) {
+  initGoldState(user);
+
+  if (!user.currentBalance) return null;
+
+  const riskAmount = user.currentBalance * GOLD_CONFIG.RISK_PERCENT;
+
+  let stake = Math.max(riskAmount, GOLD_CONFIG.MIN_STAKE);
+  stake = Math.min(stake, GOLD_CONFIG.MAX_STAKE);
+
+  return Number(stake.toFixed(2));
+}
+
+/* ================= TRADE PERMISSION ================= */
+
+export function canTradeGold(user) {
+  initGoldState(user);
+
+  if (!user.currentBalance || !user.gold.startBalance) return false;
+
+  /* ===== Max trades per day ===== */
+  if (user.gold.tradesToday >= GOLD_CONFIG.MAX_TRADES_PER_DAY) {
+    console.log('[GOLD RISK] ❌ Max daily trades reached');
+    return false;
+  }
+
+  /* ===== Daily drawdown protection ===== */
+  const maxLoss = user.gold.startBalance * GOLD_CONFIG.DAILY_MAX_LOSS_PERCENT;
+  const lossSoFar = user.gold.startBalance - user.currentBalance;
+
+  if (lossSoFar >= maxLoss) {
+    console.log('[GOLD RISK] ❌ Daily loss limit reached');
+    return false;
+  }
+
+  /* ===== Consecutive loss protection ===== */
+  if (user.gold.consecutiveLosses >= GOLD_CONFIG.MAX_CONSECUTIVE_LOSSES) {
+    console.log('[GOLD RISK] ❌ Too many consecutive losses');
+    return false;
+  }
+
+  return true;
+}
+
+/* ================= TRADE RESULT HANDLER ================= */
+
+export function handleGoldTradeResult(user, profit) {
+  initGoldState(user);
+
+  user.gold.tradesToday++;
+
+  if (profit >= GOLD_CONFIG.TARGET_PROFIT) {
+    user.gold.consecutiveLosses = 0;
+  } else {
+    user.gold.consecutiveLosses += 1;
+  }
+}
+
+/* ================= PROFIT CHECK ================= */
+
+export function shouldCloseGoldTrade(contract) {
+  if (!contract) return false;
+
+  const profit = Number(contract.profit);
+  if (isNaN(profit)) return false;
+
+  return profit >= GOLD_CONFIG.TARGET_PROFIT;
+}
