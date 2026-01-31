@@ -13,6 +13,7 @@
  * ✔ Stop after consecutive losses
  * ✔ Dynamic stake sizing
  * ✔ Daily drawdown protection
+ * ✔ Avoid trading on holidays/weekends
  */
 
 /* ================= CONFIG ================= */
@@ -32,7 +33,7 @@ const GOLD_CONFIG = {
 function initGoldState(user) {
   if (!user.gold) {
     user.gold = {
-      startBalance: null,
+      startBalance: user.currentBalance || 0,
       tradesToday: 0,
       consecutiveLosses: 0,
       lastTradeDay: new Date().toDateString()
@@ -44,8 +45,9 @@ function initGoldState(user) {
   if (user.gold.lastTradeDay !== today) {
     user.gold.tradesToday = 0;
     user.gold.consecutiveLosses = 0;
-    user.gold.startBalance = user.currentBalance;
+    user.gold.startBalance = user.currentBalance || 0;
     user.gold.lastTradeDay = today;
+    console.log('[GOLD RISK] ✅ Daily stats reset');
   }
 }
 
@@ -71,13 +73,13 @@ export function canTradeGold(user) {
 
   if (!user.currentBalance || !user.gold.startBalance) return false;
 
-  /* ===== Max trades per day ===== */
+  // ===== Max trades per day =====
   if (user.gold.tradesToday >= GOLD_CONFIG.MAX_TRADES_PER_DAY) {
     console.log('[GOLD RISK] ❌ Max daily trades reached');
     return false;
   }
 
-  /* ===== Daily drawdown protection ===== */
+  // ===== Daily drawdown protection =====
   const maxLoss = user.gold.startBalance * GOLD_CONFIG.DAILY_MAX_LOSS_PERCENT;
   const lossSoFar = user.gold.startBalance - user.currentBalance;
 
@@ -86,9 +88,15 @@ export function canTradeGold(user) {
     return false;
   }
 
-  /* ===== Consecutive loss protection ===== */
+  // ===== Consecutive loss protection =====
   if (user.gold.consecutiveLosses >= GOLD_CONFIG.MAX_CONSECUTIVE_LOSSES) {
     console.log('[GOLD RISK] ❌ Too many consecutive losses');
+    return false;
+  }
+
+  // ===== Market open check =====
+  if (!isMarketOpenGold()) {
+    console.log('[GOLD RISK] ⚠️ Market closed — skipping trade');
     return false;
   }
 
@@ -118,4 +126,19 @@ export function shouldCloseGoldTrade(contract) {
   if (isNaN(profit)) return false;
 
   return profit >= GOLD_CONFIG.TARGET_PROFIT;
+}
+
+/* ================= MARKET HOURS CHECK ================= */
+
+export function isMarketOpenGold() {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0 = Sunday, 6 = Saturday
+  const hour = now.getUTCHours(); // UTC hour
+
+  // Gold/USD (commodities) may be closed weekends
+  if (day === 0 || day === 6) return false;
+
+  // Optional: additional holiday checks can be added here
+
+  return true;
 }
