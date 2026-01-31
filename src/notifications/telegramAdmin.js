@@ -4,6 +4,9 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
 let bot = null;
 
+// Keep track of last bot messages per chat to auto-delete
+const lastBotMessages = {};
+
 /* ===== Helper: Check if Gold/USD market is open =====
    Deriv Gold/USD generally trades 24/5, but closed on weekends.
    Returns true if open, false otherwise.
@@ -16,6 +19,21 @@ function isGoldMarketOpen() {
   if (day === 6 || day === 0) return false;
 
   return true;
+}
+
+/* ===== Helper: Send message and auto-delete previous one ===== */
+async function sendBotMessage(chatId, text, options = {}) {
+  try {
+    // Delete previous bot message in this chat
+    if (lastBotMessages[chatId]) {
+      await bot.deleteMessage(chatId, lastBotMessages[chatId]).catch(() => {});
+    }
+
+    const msg = await bot.sendMessage(chatId, text, options);
+    lastBotMessages[chatId] = msg.message_id;
+  } catch (err) {
+    console.error('❌ Telegram send/delete error:', err.message);
+  }
 }
 
 export function listenTelegramAdmin(bots) {
@@ -71,7 +89,7 @@ export function listenTelegramAdmin(bots) {
     const lower = text.toLowerCase();
 
     if (lower === '/menu') {
-      return bot.sendMessage(chatId, '📋 <b>BOT CONTROL MENU</b>\nChoose an action:', { parse_mode: 'HTML', ...mainMenu });
+      return sendBotMessage(chatId, '📋 <b>BOT CONTROL MENU</b>\nChoose an action:', { parse_mode: 'HTML', ...mainMenu });
     }
 
     if (lower === '/status') {
@@ -87,7 +105,7 @@ export function listenTelegramAdmin(bots) {
         reply += `Stake: $${u.baseStake || 0}\n`;
         reply += `Fee paid: ${u.performanceFeePaid ? '✅' : '❌'}\n\n`;
       });
-      return bot.sendMessage(chatId, reply, { parse_mode: 'HTML' });
+      return sendBotMessage(chatId, reply, { parse_mode: 'HTML' });
     }
 
     if (lower === '/help') {
@@ -102,7 +120,7 @@ export function listenTelegramAdmin(bots) {
 
 Buttons recommended 👍
 `;
-      return bot.sendMessage(chatId, helpText, { parse_mode: 'HTML' });
+      return sendBotMessage(chatId, helpText, { parse_mode: 'HTML' });
     }
   });
 
@@ -118,60 +136,60 @@ Buttons recommended 👍
 
       case 'START':
         [...bots.values()].forEach(b => b.connect());
-        bot.sendMessage(chatId, '▶️ All bots started');
+        sendBotMessage(chatId, '▶️ All bots started');
         break;
 
       case 'STOP':
         [...bots.values()].forEach(b => { b.user.ws?.close(); b.user.active = false; });
-        bot.sendMessage(chatId, '⏸ All bots stopped');
+        sendBotMessage(chatId, '⏸ All bots stopped');
         break;
 
       case 'BIN_ON':
         [...bots.values()].forEach(b => b.user.enableBinary = true);
-        bot.sendMessage(chatId, '📈 Binary trading ENABLED');
+        sendBotMessage(chatId, '📈 Binary trading ENABLED');
         break;
 
       case 'BIN_OFF':
         [...bots.values()].forEach(b => b.user.enableBinary = false);
-        bot.sendMessage(chatId, '📉 Binary trading DISABLED');
+        sendBotMessage(chatId, '📉 Binary trading DISABLED');
         break;
 
       case 'GOLD_ON':
         if (!isGoldMarketOpen()) {
-          bot.sendMessage(chatId, '🥇 Gold/USD market is currently CLOSED ❌\nTry again when the market opens.');
+          sendBotMessage(chatId, '🥇 Gold/USD market is currently CLOSED ❌\nTry again when the market opens.');
         } else {
           [...bots.values()].forEach(b => b.user.enableGold = true);
-          bot.sendMessage(chatId, '🥇 Gold trading ENABLED ✅');
+          sendBotMessage(chatId, '🥇 Gold trading ENABLED ✅');
         }
         break;
 
       case 'GOLD_OFF':
         [...bots.values()].forEach(b => b.user.enableGold = false);
-        bot.sendMessage(chatId, '🛑 Gold trading DISABLED');
+        sendBotMessage(chatId, '🛑 Gold trading DISABLED');
         break;
 
       case 'PAY':
         [...bots.values()].forEach(b => b.user.performanceFeePaid = true);
-        bot.sendMessage(chatId, '💸 Trading unlocked for all bots');
+        sendBotMessage(chatId, '💸 Trading unlocked for all bots');
         break;
 
       case 'HELP':
-        bot.sendMessage(chatId, 'Use /menu to control the bot easily 🤖');
+        sendBotMessage(chatId, 'Use /menu to control the bot easily 🤖');
         break;
 
       case 'STAKE_UP':
         [...bots.values()].forEach(b => b.user.baseStake = (b.user.baseStake || 5) + 1);
-        bot.sendMessage(chatId, '💰 Base stake increased by $1 for all bots');
+        sendBotMessage(chatId, '💰 Base stake increased by $1 for all bots');
         break;
 
       case 'STAKE_DOWN':
         [...bots.values()].forEach(b => b.user.baseStake = Math.max((b.user.baseStake || 5) - 1, 1));
-        bot.sendMessage(chatId, '💰 Base stake decreased by $1 for all bots');
+        sendBotMessage(chatId, '💰 Base stake decreased by $1 for all bots');
         break;
 
       case 'STOP_ALL':
         [...bots.values()].forEach(b => { b.user.ws?.close(); b.user.active = false; });
-        bot.sendMessage(chatId, '🚨 Emergency STOP: All bots stopped');
+        sendBotMessage(chatId, '🚨 Emergency STOP: All bots stopped');
         break;
     }
 
