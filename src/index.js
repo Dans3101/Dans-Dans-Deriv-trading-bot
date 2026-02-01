@@ -11,7 +11,7 @@ import { listenTelegramAdmin } from './notifications/telegramAdmin.js';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('✅ Deriv trading bot is running on Render'));
+app.get('/', (req, res) => res.send('✅ Deriv trading bot server is now running on Render and is live you can now return to Telegram to control the Bot'));
 app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 
 /* ================= LOAD USERS ================= */
