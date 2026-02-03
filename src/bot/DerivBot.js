@@ -26,7 +26,16 @@ class AccumulatorBot {
     const now = Date.now();
     if (now - this.lastTelegramSent < this.telegramInterval) return;
     this.lastTelegramSent = now;
-    sendTelegramMessage(message);
+
+    // sendTelegramMessage may be async depending on implementation; guard against unhandled rejections
+    try {
+      const res = sendTelegramMessage(message);
+      if (res && typeof res.catch === 'function') {
+        res.catch(err => console.error('Telegram send failed (acc):', err && err.message ? err.message : err));
+      }
+    } catch (err) {
+      console.error('Telegram send failed (acc):', err && err.message ? err.message : err);
+    }
   }
 
   placeTrade() {
@@ -45,19 +54,24 @@ class AccumulatorBot {
     console.log(`[ACC TRADE] 🚀 $${stake}`);
     this.safeTelegram(`🚀 ${this.user.userId} | Accumulator | $${stake}`);
 
-    this.user.ws.send(JSON.stringify({
-      buy: 1,
-      price: stake,
-      parameters: {
-        amount: stake,
-        basis: 'stake',
-        contract_type: 'ACCU', // Accumulator type
-        currency: 'USD',
-        duration: 1,
-        duration_unit: 'm',
-        symbol: this.user.market
-      }
-    }));
+    if (this.user.ws?.readyState === WebSocket.OPEN) {
+      this.user.ws.send(JSON.stringify({
+        buy: 1,
+        price: stake,
+        parameters: {
+          amount: stake,
+          basis: 'stake',
+          contract_type: 'ACCU', // Accumulator type
+          currency: 'USD',
+          duration: 1,
+          duration_unit: 'm',
+          symbol: this.user.market
+        }
+      }));
+    } else {
+      console.warn(`[${this.user.userId}] ⚠️ WS not open (acc placeTrade)`);
+      this.inTrade = false;
+    }
   }
 
   handleContractUpdate(contract) {
@@ -191,7 +205,15 @@ export class DerivBot {
     const now = Date.now();
     if (now - this.lastTelegramSent < this.telegramInterval) return;
     this.lastTelegramSent = now;
-    sendTelegramMessage(message);
+
+    try {
+      const res = sendTelegramMessage(message);
+      if (res && typeof res.catch === 'function') {
+        res.catch(err => console.error('Telegram send failed:', err && err.message ? err.message : err));
+      }
+    } catch (err) {
+      console.error('Telegram send failed:', err && err.message ? err.message : err);
+    }
   }
 
   /* ================= MESSAGE HANDLER ================= */
@@ -207,8 +229,12 @@ export class DerivBot {
         this.handleBalance(data.balance?.balance);
         break;
 
+      // Accept both history and ticks_history (and fallback candles) payloads
       case 'history':
-        this.candles = (data.history || []).map(h => ({
+      case 'ticks_history':
+      case 'candles': {
+        const hist = data.history || data.ticks_history || data.candles || [];
+        this.candles = (hist || []).map(h => ({
           open: h.open,
           close: h.close,
           high: h.high,
@@ -217,6 +243,7 @@ export class DerivBot {
         }));
         console.log(`[${this.user.userId}] 📊 History loaded: ${this.candles.length} candles`);
         break;
+      }
 
       case 'tick':
         this.handleTick(data.tick);
@@ -230,7 +257,7 @@ export class DerivBot {
 
       case 'proposal_open_contract':
         // Accumulator contract update
-        if (data.proposal_open_contract.contract_type === 'ACCU') {
+        if (data.proposal_open_contract?.contract_type === 'ACCU') {
           this.accBot.handleContractUpdate(data.proposal_open_contract);
         } else {
           this.handleContractUpdate(data.proposal_open_contract);
@@ -250,12 +277,15 @@ export class DerivBot {
     this.tickBuffer.push(tick);
 
     const firstTick = this.tickBuffer[0];
+    if (!firstTick) return;
+
     if (tick.epoch - firstTick.epoch >= 60) {
+      const quotes = this.tickBuffer.map(t => t.quote).filter(q => typeof q === 'number');
       const miniCandle = {
         open: firstTick.quote,
         close: tick.quote,
-        high: Math.max(...this.tickBuffer.map(t => t.quote)),
-        low: Math.min(...this.tickBuffer.map(t => t.quote)),
+        high: quotes.length ? Math.max(...quotes) : firstTick.quote,
+        low: quotes.length ? Math.min(...quotes) : firstTick.quote,
         epoch: tick.epoch
       };
 
@@ -273,7 +303,7 @@ export class DerivBot {
 
   /* ================= BALANCE ================= */
   handleBalance(balance) {
-    if (!balance) return;
+    if (balance === undefined || balance === null) return;
     console.log(`[${this.user.userId}] 💰 Balance: ${balance}`);
 
     if (!this.user.startBalance) this.user.startBalance = balance;
