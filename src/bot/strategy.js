@@ -1,141 +1,122 @@
 /**
- * EMA crossover + RSI + body-size filter strategy
+ * SMART TREND STRATEGY (Upgraded)
  *
- * - Fast EMA / Slow EMA crossover for trend (fast: 3, slow: 8)
- * - RSI(14) for momentum confirmation (overbought/oversold avoided)
- * - Average body size filter to ignore low-volatility periods
- * - Last candle confirmation (direction + sufficient body)
+ * Improvements:
+ * - Slower EMA crossover (5/15) → less noise
+ * - RSI confirmation tighter
+ * - Volatility filter (body strength)
+ * - Cooldown between trades
+ * - No random fallback entries
+ * - Much fewer but higher quality trades
  *
  * Returns 'CALL', 'PUT', or null
  */
+
+let lastTradeTime = 0;
+const COOLDOWN_MS = 90 * 1000; // 90 seconds between trades
+
+function now() {
+  return Date.now();
+}
 
 function toNumber(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : NaN;
 }
 
-function closesFrom(candles) {
-  return candles.map(c => toNumber(c.close));
-}
-
-function bodiesFrom(candles) {
-  return candles.map(c => {
-    const o = toNumber(c.open);
-    const cl = toNumber(c.close);
-    if (Number.isNaN(o) || Number.isNaN(cl)) return NaN;
-    return Math.abs(cl - o);
-  });
-}
-
 function sma(values) {
-  if (!Array.isArray(values) || values.length === 0) return NaN;
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
 function ema(values, period) {
-  if (!Array.isArray(values) || values.length < period) return NaN;
+  if (values.length < period) return NaN;
+
   const k = 2 / (period + 1);
-  // start with SMA of first period
-  let prev = sma(values.slice(0, period));
-  let emaVal = prev;
+  let emaVal = sma(values.slice(0, period));
+
   for (let i = period; i < values.length; i++) {
-    const v = values[i];
-    if (Number.isNaN(v)) return NaN;
-    emaVal = v * k + emaVal * (1 - k);
+    emaVal = values[i] * k + emaVal * (1 - k);
   }
+
   return emaVal;
 }
 
 function rsi(values, period = 14) {
-  if (!Array.isArray(values) || values.length < period + 1) return NaN;
+  if (values.length < period + 1) return NaN;
+
   let gains = 0;
   let losses = 0;
-  // initial average gain/loss from first period
+
   for (let i = 1; i <= period; i++) {
     const diff = values[i] - values[i - 1];
     if (diff > 0) gains += diff;
     else losses += Math.abs(diff);
   }
+
   let avgGain = gains / period;
   let avgLoss = losses / period;
-  // continue smoothing for the rest
+
   for (let i = period + 1; i < values.length; i++) {
     const diff = values[i] - values[i - 1];
     const gain = diff > 0 ? diff : 0;
     const loss = diff < 0 ? Math.abs(diff) : 0;
+
     avgGain = (avgGain * (period - 1) + gain) / period;
     avgLoss = (avgLoss * (period - 1) + loss) / period;
   }
+
   if (avgLoss === 0) return 100;
+
   const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);
 }
 
-/**
- * decideTradeDirection
- * @param {Array} candles - array of candle objects with open, close (strings or numbers)
- * @returns {'CALL'|'PUT'|null}
- */
 export function decideTradeDirection(candles) {
-  if (!Array.isArray(candles) || candles.length < 16) return null; // need enough history
+  if (!Array.isArray(candles) || candles.length < 40) return null;
 
-  // We'll use the last 20 candles for indicators (safe buffer)
-  const window = candles.slice(-30);
-  const closes = closesFrom(window);
-  const bodies = bodiesFrom(window);
+  // cooldown (prevents overtrading)
+  if (now() - lastTradeTime < COOLDOWN_MS) return null;
 
-  if (closes.some(c => Number.isNaN(c)) || bodies.some(b => Number.isNaN(b))) return null;
+  const window = candles.slice(-40);
 
-  // average body filter (ignore low-volatility)
-  const avgBody = sma(bodies.slice(-12));
-  if (!Number.isFinite(avgBody) || avgBody < 0.02) return null; // threshold tuned for 1m candles
+  const closes = window.map(c => toNumber(c.close));
+  const bodies = window.map(c =>
+    Math.abs(toNumber(c.close) - toNumber(c.open))
+  );
 
-  // EMA crossover
-  const fastPeriod = 3;
-  const slowPeriod = 8;
-  const fastEma = ema(closes, fastPeriod);
-  const slowEma = ema(closes, slowPeriod);
-  if (!Number.isFinite(fastEma) || !Number.isFinite(slowEma)) return null;
+  if (closes.some(isNaN) || bodies.some(isNaN)) return null;
 
-  // For crossover confirmation, compute previous EMAs (one candle earlier)
-  const closesPrev = closes.slice(0, -1);
-  const fastPrev = closesPrev.length >= fastPeriod ? ema(closesPrev, fastPeriod) : NaN;
-  const slowPrev = closesPrev.length >= slowPeriod ? ema(closesPrev, slowPeriod) : NaN;
-  if (!Number.isFinite(fastPrev) || !Number.isFinite(slowPrev)) return null;
+  // ===== Volatility filter =====
+  const avgBody = sma(bodies.slice(-15));
+  const lastBody = bodies[bodies.length - 1];
 
-  // RSI momentum
+  if (lastBody < avgBody * 0.8) return null;
+
+  // ===== Indicators =====
+  const fast = ema(closes, 5);
+  const slow = ema(closes, 15);
+
+  const prevFast = ema(closes.slice(0, -1), 5);
+  const prevSlow = ema(closes.slice(0, -1), 15);
+
   const r = rsi(closes, 14);
-  if (!Number.isFinite(r)) return null;
 
-  // last candle confirmation
-  const last = window[window.length - 1];
-  const lastBody = Math.abs(toNumber(last.close) - toNumber(last.open));
-  if (lastBody < avgBody * 0.5) return null; // ignore very weak last candle
+  if (!Number.isFinite(fast) || !Number.isFinite(slow) || !Number.isFinite(r))
+    return null;
 
-  // Trading rules:
-  // - Bullish (CALL): fast EMA crossed above slow EMA (prev fast <= prev slow && fast > slow)
-  //   AND RSI not overbought (r < 75)
-  // - Bearish (PUT): fast EMA crossed below slow EMA (prev fast >= prev slow && fast < slow)
-  //   AND RSI not oversold (r > 25)
-  const crossedUp = fastPrev <= slowPrev && fastEma > slowEma;
-  const crossedDown = fastPrev >= slowPrev && fastEma < slowEma;
+  const crossedUp = prevFast <= prevSlow && fast > slow;
+  const crossedDown = prevFast >= prevSlow && fast < slow;
 
-  if (crossedUp && r < 75) return 'CALL';
-  if (crossedDown && r > 25) return 'PUT';
+  // ===== Trade logic (stricter) =====
+  if (crossedUp && r > 45 && r < 70) {
+    lastTradeTime = now();
+    return 'CALL';
+  }
 
-  // optional: require at least 2 of last 3 closes in direction
-  const recentCloses = closes.slice(-4);
-  const upCloses = recentCloses.filter((v, i, arr) => {
-    if (i === 0) return false;
-    return v > arr[i - 1];
-  }).length;
-  const downCloses = recentCloses.filter((v, i, arr) => {
-    if (i === 0) return false;
-    return v < arr[i - 1];
-  }).length;
-
-  if (upCloses >= 2 && fastEma > slowEma && r < 80) return 'CALL';
-  if (downCloses >= 2 && fastEma < slowEma && r > 20) return 'PUT';
+  if (crossedDown && r < 55 && r > 30) {
+    lastTradeTime = now();
+    return 'PUT';
+  }
 
   return null;
 }
