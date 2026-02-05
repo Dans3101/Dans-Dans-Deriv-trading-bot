@@ -4,6 +4,7 @@ import WebSocket from 'ws';
 import { DERIV_WS, SETTINGS } from '../config/deriv.js';
 import { calculateStake, checkLimits } from './riskManager.js';
 import { decideTradeDirection } from './strategy.js';
+import { createDigitMonitor, decideFromMonitor } from './digitStrategy.js';
 import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
 import { logTrade } from '../utils/tradeLogger.js';
@@ -17,7 +18,7 @@ class AccumulatorBot {
     this.lastTelegramSent = 0;
     this.telegramInterval = 2000;
 
-    this.baseStake = 5; // starting stake
+    this.baseStake = 5;
     this.lastProfit = null;
     this.cooldown = false;
   }
@@ -27,7 +28,6 @@ class AccumulatorBot {
     if (now - this.lastTelegramSent < this.telegramInterval) return;
     this.lastTelegramSent = now;
 
-    // sendTelegramMessage may be async depending on implementation; guard against unhandled rejections
     try {
       const res = sendTelegramMessage(message);
       if (res && typeof res.catch === 'function') {
@@ -45,8 +45,6 @@ class AccumulatorBot {
     if (limits !== 'OK') return;
 
     let stake = this.baseStake;
-
-    // Increase stake after last win
     if (this.lastProfit > 0) stake = +(stake * 1.2).toFixed(2);
 
     this.inTrade = true;
@@ -61,7 +59,7 @@ class AccumulatorBot {
         parameters: {
           amount: stake,
           basis: 'stake',
-          contract_type: 'ACCU', // Accumulator type
+          contract_type: 'ACCU',
           currency: 'USD',
           duration: 1,
           duration_unit: 'm',
@@ -81,10 +79,9 @@ class AccumulatorBot {
     this.inTrade = false;
     this.currentContractId = null;
 
-    // Cooldown if loss
     if (profit < 0) {
       this.cooldown = true;
-      setTimeout(() => this.cooldown = false, 2 * 60 * 1000); // 2 min cooldown
+      setTimeout(() => this.cooldown = false, 2 * 60 * 1000);
     }
 
     this.lastProfit = profit;
@@ -109,7 +106,7 @@ export class DerivBot {
   constructor(user) {
     this.user = user;
 
-    // ===== STATE =====
+    // state
     this.candles = [];
     this.currentContractId = null;
     this.reconnectTimeout = null;
@@ -128,27 +125,29 @@ export class DerivBot {
     this.lastTelegramSent = 0;
     this.telegramInterval = 2000;
 
-    // ===== MINI-CANDLE BUILDING =====
+    // mini-candle
     this.tickBuffer = [];
 
-    // ===== CONTINUOUS TRADING LOOP =====
+    // trading loop
     this.tradeLoop = null;
 
-    // ===== TRADE RATE LIMITER =====
+    // rate limiter
     this.tradeTimestamps = [];
     this.MAX_TRADES_PER_MIN = 10;
 
-    // ===== ACCUMULATOR BOT =====
+    // accumulator
     this.accBot = new AccumulatorBot(this.user);
 
-    // ===== DEFAULT MARKET =====
+    // digit strategy monitor (R_100 1s)
+    this.digitMonitor = createDigitMonitor({ windowSize: 60 });
+
+    // default market
     if (!this.user.market) {
-      this.user.market = 'R_50';
+      this.user.market = 'R_100';
       console.log(`[${this.user.userId}] Market set to default: ${this.user.market}`);
     }
   }
 
-  /* ================= CONNECTION ================= */
   connect() {
     const appId = process.env.DERIV_APP_ID || 1089;
     this.user.ws = new WebSocket(DERIV_WS(appId));
@@ -216,7 +215,6 @@ export class DerivBot {
     }
   }
 
-  /* ================= MESSAGE HANDLER ================= */
   handleMessage(data) {
     switch (data.msg_type) {
       case 'authorize':
@@ -229,7 +227,6 @@ export class DerivBot {
         this.handleBalance(data.balance?.balance);
         break;
 
-      // Accept both history and ticks_history (and fallback candles) payloads
       case 'history':
       case 'ticks_history':
       case 'candles': {
@@ -256,7 +253,6 @@ export class DerivBot {
         break;
 
       case 'proposal_open_contract':
-        // Accumulator contract update
         if (data.proposal_open_contract?.contract_type === 'ACCU') {
           this.accBot.handleContractUpdate(data.proposal_open_contract);
         } else {
@@ -270,16 +266,57 @@ export class DerivBot {
     }
   }
 
-  /* ================= MINI-CANDLE BUILDER ================= */
   handleTick(tick) {
     if (!tick?.quote || !tick?.epoch) return;
 
+    // digit monitor (integer last digit)
+    const digit = this.digitMonitor.add(tick.quote);
+
     this.tickBuffer.push(tick);
 
+    // Digit-strategy decision (for R_100)
+    try {
+      const strategyMode = this.user.strategyMode || 'OVER';
+      const direction = decideFromMonitor(this.digitMonitor, { mode: strategyMode });
+
+      const isR100 = String(this.user.market || '').toUpperCase().includes('100');
+      if (direction && isR100 && !this.user.inTrade && this.user.active && canTrade(this.user) && this.canTradeNow()) {
+        const limits = checkLimits(this.user);
+        if (limits === 'OK') {
+          const stake = calculateStake(this.user) || (this.user.baseStake || 1);
+
+          console.log(`[DIGIT STRAT] ${this.user.userId} → ${direction} (digit=${digit}) stake=${stake}`);
+          this.safeTelegram(`[DIGIT STRAT] ${this.user.userId} | ${direction} | $${stake} (digit ${digit})`);
+
+          this.send({
+            buy: 1,
+            price: stake,
+            parameters: {
+              amount: stake,
+              basis: 'stake',
+              contract_type: direction,
+              currency: 'USD',
+              duration: 1,
+              duration_unit: 's',
+              symbol: this.user.market
+            }
+          });
+
+          // Prevent concurrent trades until contract update arrives
+          this.user.inTrade = true;
+          this.user.tradesToday++;
+          this.firstTradeDone = true;
+        }
+      }
+    } catch (e) {
+      console.error(`[${this.user.userId}] ❌ Digit strategy error`, e && e.message ? e.message : e);
+    }
+
+    // Build mini-candle based on configured granularity
     const firstTick = this.tickBuffer[0];
     if (!firstTick) return;
 
-    if (tick.epoch - firstTick.epoch >= 60) {
+    if (tick.epoch - firstTick.epoch >= SETTINGS.CANDLE_GRANULARITY) {
       const quotes = this.tickBuffer.map(t => t.quote).filter(q => typeof q === 'number');
       const miniCandle = {
         open: firstTick.quote,
@@ -296,12 +333,10 @@ export class DerivBot {
 
       console.log(`[${this.user.userId}] 📊 Mini-candle built: O:${miniCandle.open} H:${miniCandle.high} L:${miniCandle.low} C:${miniCandle.close}`);
 
-      // Optional: Try a trade immediately after candle
       this.tryTrade();
     }
   }
 
-  /* ================= BALANCE ================= */
   handleBalance(balance) {
     if (balance === undefined || balance === null) return;
     console.log(`[${this.user.userId}] 💰 Balance: ${balance}`);
@@ -334,7 +369,6 @@ export class DerivBot {
     });
   }
 
-  /* ================= CONTINUOUS TRADING LOOP ================= */
   startTradeLoop() {
     if (this.tradeLoop) return;
 
@@ -346,7 +380,6 @@ export class DerivBot {
   }
 
   startAccumulatorLoop() {
-    // Accumulator trade every 3–5 minutes
     setInterval(() => {
       if (this.user.active) this.accBot.placeTrade();
     }, 3 * 60 * 1000 + Math.random() * 2 * 60 * 1000);
