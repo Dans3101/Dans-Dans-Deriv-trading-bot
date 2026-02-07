@@ -10,13 +10,12 @@ import { canTrade } from '../middleware/paymentGuard.js';
 import { logTrade } from '../utils/tradeLogger.js';
 
 /**
- * Improved DerivBot with debug logs:
- * - MSG_RAW (all unrecognized messages)
- * - TICK logging
- * - SEND BUY payload logs (digit/candle/acc)
- * - calculateStake diagnostic logs
- *
- * Paste/replace this file and restart your bot.
+ * DerivBot - improved version with:
+ * - digit-based R_100 1s trading integration
+ * - pendingBuy timeout to avoid getting stuck when buys aren't confirmed
+ * - configurable higher rate limit for tick trading
+ * - WS heartbeat (ping) and safer cleanup on close/error
+ * - debug logs: MSG_RAW, TICK, SEND BUY, calculateStake
  */
 
 /* ================= ACCUMULATOR BOT ================= */
@@ -26,16 +25,27 @@ class AccumulatorBot {
     this.bot = parentBot; // optional reference to DerivBot for shared flags
     this.inTrade = false;
     this.currentContractId = null;
+    this.lastTelegramSent = 0;
+    this.telegramInterval = 2000;
+
+    this.baseStake = 5;
+    this.lastProfit = null;
+    this.cooldown = false;
   }
 
-  safeTelegram(msg) {
+  safeTelegram(message) {
+    const now = Date.now();
+    if (now - this.lastTelegramSent < this.telegramInterval) return;
+    this.lastTelegramSent = now;
     try {
-      const res = sendTelegramMessage(msg);
-      if (res && typeof res.catch === 'function') res.catch(() => {});
-    } catch (e) {}
+      const res = sendTelegramMessage(message);
+      if (res && typeof res.catch === 'function') res.catch(err => console.error('Telegram send failed (acc):', err?.message || err));
+    } catch (err) {
+      console.error('Telegram send failed (acc):', err?.message || err);
+    }
   }
 
-  placeTrade(amount = 1) {
+  placeTrade() {
     // Respect parent bot's pending/inTrade if provided
     if (!this.user.active || this.inTrade || !canTrade(this.user)) return;
     if (this.bot && (this.bot.pendingBuy || this.user.inTrade)) return;
@@ -43,12 +53,16 @@ class AccumulatorBot {
     const limits = checkLimits(this.user);
     if (limits !== 'OK') return;
 
+    let stake = this.baseStake;
+    if (this.lastProfit > 0) stake = +(stake * 1.2).toFixed(2);
+
     this.inTrade = true;
+
     const payload = {
       buy: 1,
-      price: amount,
+      price: stake,
       parameters: {
-        amount,
+        amount: stake,
         basis: 'stake',
         contract_type: 'ACCU',
         currency: 'USD',
@@ -59,7 +73,7 @@ class AccumulatorBot {
     };
 
     console.log(`[${this.user.userId}] SEND BUY (acc) payload:`, JSON.stringify(payload));
-    this.safeTelegram(`🚀 ${this.user.userId} | Accumulator | $${amount}`);
+    this.safeTelegram(`🚀 ${this.user.userId} | Accumulator | $${stake}`);
 
     if (this.user.ws?.readyState === WebSocket.OPEN) {
       this.user.ws.send(JSON.stringify(payload));
@@ -71,10 +85,22 @@ class AccumulatorBot {
 
   handleContractUpdate(contract) {
     if (!contract?.is_sold) return;
+
     const profit = Number(contract.profit);
     this.inTrade = false;
+    this.currentContractId = null;
+
+    if (profit < 0) {
+      this.cooldown = true;
+      setTimeout(() => this.cooldown = false, 2 * 60 * 1000);
+    }
+
+    this.lastProfit = profit;
+
     const result = profit >= 0 ? 'WIN' : 'LOSS';
+    console.log(`[ACC RESULT] ${result} | Profit: ${profit}`);
     this.safeTelegram(`[ACC RESULT] ${this.user.userId} | ${result} | Profit: ${profit}`);
+
     logTrade({
       userId: this.user.userId,
       market: this.user.market,
@@ -120,7 +146,7 @@ export class DerivBot {
     this.tradeTimestamps = [];
     this.MAX_TRADES_PER_MIN = this.user.maxTradesPerMin || 30;
 
-    // accumulator (pass bot instance so accumulator checks shared flags)
+    // accumulator
     this.accBot = new AccumulatorBot(this.user, this);
 
     // digit strategy monitor (R_100 1s)
@@ -152,14 +178,14 @@ export class DerivBot {
       this.authorize();
       this.startTradeLoop();
       this.startAccumulatorLoop();
-      // heartbeat
+      // start heartbeat pings
       try {
         this.wsPingInterval = setInterval(() => {
           if (this.user.ws?.readyState === WebSocket.OPEN) {
-            try { this.user.ws.ping(); } catch (e) {}
+            try { this.user.ws.ping(); } catch (e) { /* ignore */ }
           }
         }, this.WS_PING_INTERVAL_MS);
-      } catch (e) {}
+      } catch (e) { /* ignore */ }
     });
 
     this.user.ws.on('message', msg => {
@@ -282,6 +308,7 @@ export class DerivBot {
         break;
 
       case 'proposal_open_contract':
+        // Accumulator contract update or normal contract update
         if (data.proposal_open_contract?.contract_type === 'ACCU') {
           this.accBot.handleContractUpdate(data.proposal_open_contract);
         } else {
