@@ -16,6 +16,8 @@ import { logTrade } from '../utils/tradeLogger.js';
  * - configurable higher rate limit for tick trading
  * - WS heartbeat (ping) and safer cleanup on close/error
  * - debug logs: MSG_RAW, TICK, SEND BUY, calculateStake
+ *
+ * Note: sixPercentThreshold relaxed for testing to make digit strategy easier to trigger.
  */
 
 /* ================= ACCUMULATOR BOT ================= */
@@ -338,11 +340,12 @@ export class DerivBot {
     // Digit-strategy decision (for R_100)
     try {
       const strategyMode = this.user.strategyMode || 'OVER';
+      // Relaxed thresholds for testing: lower windowCheckCount and higher sixPercentThreshold
       const direction = decideFromMonitor(this.digitMonitor, {
         mode: strategyMode,
-        windowCheckCount: this.user.digitWindowCheckCount || 3,
+        windowCheckCount: this.user.digitWindowCheckCount || 2,
         lookbackForLow: this.user.digitLookback || 6,
-        sixPercentThreshold: this.user.digitSixPct || 12
+        sixPercentThreshold: this.user.digitSixPct || 90
       });
 
       const isR100 = String(this.user.market || '').toUpperCase().includes('100');
