@@ -9,6 +9,15 @@ import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
 import { logTrade } from '../utils/tradeLogger.js';
 
+/**
+ * DerivBot - improved version with:
+ * - digit-based R_100 1s trading integration
+ * - pendingBuy timeout to avoid getting stuck when buys aren't confirmed
+ * - configurable higher rate limit for tick trading
+ * - WS heartbeat (ping) and safer cleanup on close/error
+ * - safer Telegram send (catch Promise rejections)
+ */
+
 /* ================= ACCUMULATOR BOT ================= */
 class AccumulatorBot {
   constructor(user) {
@@ -27,14 +36,11 @@ class AccumulatorBot {
     const now = Date.now();
     if (now - this.lastTelegramSent < this.telegramInterval) return;
     this.lastTelegramSent = now;
-
     try {
       const res = sendTelegramMessage(message);
-      if (res && typeof res.catch === 'function') {
-        res.catch(err => console.error('Telegram send failed (acc):', err && err.message ? err.message : err));
-      }
+      if (res && typeof res.catch === 'function') res.catch(err => console.error('Telegram send failed (acc):', err?.message || err));
     } catch (err) {
-      console.error('Telegram send failed (acc):', err && err.message ? err.message : err);
+      console.error('Telegram send failed (acc):', err?.message || err);
     }
   }
 
@@ -48,7 +54,6 @@ class AccumulatorBot {
     if (this.lastProfit > 0) stake = +(stake * 1.2).toFixed(2);
 
     this.inTrade = true;
-
     console.log(`[ACC TRADE] 🚀 $${stake}`);
     this.safeTelegram(`🚀 ${this.user.userId} | Accumulator | $${stake}`);
 
@@ -125,21 +130,31 @@ export class DerivBot {
     this.lastTelegramSent = 0;
     this.telegramInterval = 2000;
 
-    // mini-candle
+    // ===== MINI-CANDLE BUILDING =====
     this.tickBuffer = [];
 
-    // trading loop
+    // ===== CONTINUOUS TRADING LOOP =====
     this.tradeLoop = null;
 
-    // rate limiter
+    // ===== TRADE RATE LIMITER =====
     this.tradeTimestamps = [];
-    this.MAX_TRADES_PER_MIN = 10;
+    // allow per-user override; default higher for tick trading
+    this.MAX_TRADES_PER_MIN = this.user.maxTradesPerMin || 30;
 
-    // accumulator
+    // ===== ACCUMULATOR BOT =====
     this.accBot = new AccumulatorBot(this.user);
 
-    // digit strategy monitor (R_100 1s)
+    // ===== DIGIT STRATEGY MONITOR (R_100 1s) =====
     this.digitMonitor = createDigitMonitor({ windowSize: 60 });
+
+    // pending buy handling to avoid being stuck
+    this.pendingBuy = false;
+    this.pendingBuyTimeout = null;
+    this.PENDING_BUY_TIMEOUT_MS = 5000; // cancel pending buy if buy confirmation not received in this ms
+
+    // ws heartbeat handle
+    this.wsPingInterval = null;
+    this.WS_PING_INTERVAL_MS = 15000;
 
     // default market
     if (!this.user.market) {
@@ -148,6 +163,7 @@ export class DerivBot {
     }
   }
 
+  /* ================= CONNECTION ================= */
   connect() {
     const appId = process.env.DERIV_APP_ID || 1089;
     this.user.ws = new WebSocket(DERIV_WS(appId));
@@ -157,24 +173,36 @@ export class DerivBot {
       this.authorize();
       this.startTradeLoop();
       this.startAccumulatorLoop();
+      // start heartbeat pings
+      try {
+        this.wsPingInterval = setInterval(() => {
+          if (this.user.ws?.readyState === WebSocket.OPEN) {
+            try { this.user.ws.ping(); } catch (e) { /* ignore */ }
+          }
+        }, this.WS_PING_INTERVAL_MS);
+      } catch (e) { /* ignore */ }
     });
 
     this.user.ws.on('message', msg => {
       try {
         this.handleMessage(JSON.parse(msg));
       } catch (e) {
-        console.error(`[${this.user.userId}] ❌ JSON parse error`, e.message);
+        console.error(`[${this.user.userId}] ❌ JSON parse error`, e?.message || e);
       }
     });
 
     this.user.ws.on('close', () => {
       console.log(`[${this.user.userId}] ❌ Disconnected`);
       this.user.active = false;
+      this._clearPendingBuy();
+      this._clearPingInterval();
       this.scheduleReconnect();
     });
 
     this.user.ws.on('error', err => {
-      console.error(`[${this.user.userId}] ❌ WS error`, err.message);
+      console.error(`[${this.user.userId}] ❌ WS error`, err?.message || err);
+      this._clearPendingBuy();
+      this._clearPingInterval();
     });
   }
 
@@ -204,17 +232,30 @@ export class DerivBot {
     const now = Date.now();
     if (now - this.lastTelegramSent < this.telegramInterval) return;
     this.lastTelegramSent = now;
-
     try {
       const res = sendTelegramMessage(message);
-      if (res && typeof res.catch === 'function') {
-        res.catch(err => console.error('Telegram send failed:', err && err.message ? err.message : err));
-      }
+      if (res && typeof res.catch === 'function') res.catch(err => console.error('Telegram send failed:', err?.message || err));
     } catch (err) {
-      console.error('Telegram send failed:', err && err.message ? err.message : err);
+      console.error('Telegram send failed:', err?.message || err);
     }
   }
 
+  _clearPendingBuy() {
+    this.pendingBuy = false;
+    if (this.pendingBuyTimeout) {
+      clearTimeout(this.pendingBuyTimeout);
+      this.pendingBuyTimeout = null;
+    }
+  }
+
+  _clearPingInterval() {
+    if (this.wsPingInterval) {
+      clearInterval(this.wsPingInterval);
+      this.wsPingInterval = null;
+    }
+  }
+
+  /* ================= MESSAGE HANDLER ================= */
   handleMessage(data) {
     switch (data.msg_type) {
       case 'authorize':
@@ -247,12 +288,22 @@ export class DerivBot {
         break;
 
       case 'buy':
+        // buy confirmation from server
         console.log(`[${this.user.userId}] 📝 Buy accepted`);
-        this.currentContractId = data.buy.contract_id;
+        // clear pending-buy timeout and mark as inTrade
+        if (this.pendingBuyTimeout) {
+          clearTimeout(this.pendingBuyTimeout);
+          this.pendingBuyTimeout = null;
+        }
+        this.pendingBuy = false;
+
+        this.currentContractId = data.buy?.contract_id || null;
+        this.user.inTrade = true;
         this.subscribeContract();
         break;
 
       case 'proposal_open_contract':
+        // Accumulator contract update or normal contract update
         if (data.proposal_open_contract?.contract_type === 'ACCU') {
           this.accBot.handleContractUpdate(data.proposal_open_contract);
         } else {
@@ -266,6 +317,7 @@ export class DerivBot {
     }
   }
 
+  /* ================= MINI-CANDLE BUILDING & DIGIT STRAT ================= */
   handleTick(tick) {
     if (!tick?.quote || !tick?.epoch) return;
 
@@ -277,16 +329,38 @@ export class DerivBot {
     // Digit-strategy decision (for R_100)
     try {
       const strategyMode = this.user.strategyMode || 'OVER';
-      const direction = decideFromMonitor(this.digitMonitor, { mode: strategyMode });
+      // tuneable params for more frequent trading
+      const direction = decideFromMonitor(this.digitMonitor, {
+        mode: strategyMode,
+        windowCheckCount: this.user.digitWindowCheckCount || 3,
+        lookbackForLow: this.user.digitLookback || 6,
+        sixPercentThreshold: this.user.digitSixPct || 12
+      });
 
       const isR100 = String(this.user.market || '').toUpperCase().includes('100');
-      if (direction && isR100 && !this.user.inTrade && this.user.active && canTrade(this.user) && this.canTradeNow()) {
+
+      if (
+        direction &&
+        isR100 &&
+        !this.user.inTrade &&
+        !this.pendingBuy &&
+        this.user.active &&
+        canTrade(this.user) &&
+        this.canTradeNow()
+      ) {
         const limits = checkLimits(this.user);
         if (limits === 'OK') {
-          const stake = calculateStake(this.user) || (this.user.baseStake || 1);
+          const stake = calculateStake(this.user) || Math.max(0.2, this.user.baseStake || 0.5);
+
+          // mark pending buy and set timeout to clear if no buy confirmation
+          this.pendingBuy = true;
+          this.pendingBuyTimeout = setTimeout(() => {
+            console.warn(`[${this.user.userId}] ⚠️ pending 1s buy timed out`);
+            this._clearPendingBuy();
+          }, this.PENDING_BUY_TIMEOUT_MS);
 
           console.log(`[DIGIT STRAT] ${this.user.userId} → ${direction} (digit=${digit}) stake=${stake}`);
-          this.safeTelegram(`[DIGIT STRAT] ${this.user.userId} | ${direction} | $${stake} (digit ${digit})`);
+          this.safeTelegram(`[DIGIT STRAT] ${this.user.userId} | Attempting ${direction} | $${stake} (digit ${digit})`);
 
           this.send({
             buy: 1,
@@ -294,22 +368,21 @@ export class DerivBot {
             parameters: {
               amount: stake,
               basis: 'stake',
-              contract_type: direction,
+              contract_type: direction, // CALL = Over, PUT = Under (assumed)
               currency: 'USD',
               duration: 1,
-              duration_unit: 's',
+              duration_unit: 's', // 1-second contract
               symbol: this.user.market
             }
           });
 
-          // Prevent concurrent trades until contract update arrives
-          this.user.inTrade = true;
           this.user.tradesToday++;
           this.firstTradeDone = true;
         }
       }
     } catch (e) {
-      console.error(`[${this.user.userId}] ❌ Digit strategy error`, e && e.message ? e.message : e);
+      console.error(`[${this.user.userId}] ❌ Digit strategy error`, e?.message || e);
+      this._clearPendingBuy();
     }
 
     // Build mini-candle based on configured granularity
@@ -333,10 +406,12 @@ export class DerivBot {
 
       console.log(`[${this.user.userId}] 📊 Mini-candle built: O:${miniCandle.open} H:${miniCandle.high} L:${miniCandle.low} C:${miniCandle.close}`);
 
+      // Optional: Try a candle-based trade too
       this.tryTrade();
     }
   }
 
+  /* ================= BALANCE ================= */
   handleBalance(balance) {
     if (balance === undefined || balance === null) return;
     console.log(`[${this.user.userId}] 💰 Balance: ${balance}`);
@@ -369,17 +444,19 @@ export class DerivBot {
     });
   }
 
+  /* ================= CONTINUOUS TRADING LOOP ================= */
   startTradeLoop() {
     if (this.tradeLoop) return;
 
     this.tradeLoop = setInterval(() => {
-      if (!this.user.inTrade && this.user.active && canTrade(this.user)) {
+      if (!this.user.inTrade && !this.pendingBuy && this.user.active && canTrade(this.user)) {
         this.tryTrade();
       }
     }, 1000);
   }
 
   startAccumulatorLoop() {
+    // Accumulator trade every 3–5 minutes
     setInterval(() => {
       if (this.user.active) this.accBot.placeTrade();
     }, 3 * 60 * 1000 + Math.random() * 2 * 60 * 1000);
@@ -394,7 +471,7 @@ export class DerivBot {
   }
 
   tryTrade(force = false) {
-    if (!this.user.active || this.user.inTrade) return;
+    if (!this.user.active || this.user.inTrade || this.pendingBuy) return;
     if (!this.canTradeNow()) return;
 
     const limits = checkLimits(this.user);
@@ -407,15 +484,18 @@ export class DerivBot {
     }
     if (!direction) return;
 
-    const stake = calculateStake(this.user);
+    const stake = calculateStake(this.user) || Math.max(0.5, this.user.baseStake || 0.5);
     if (!stake || stake <= 0) return;
 
-    this.user.inTrade = true;
-    this.user.tradesToday++;
-    this.firstTradeDone = true;
+    // mark pending buy and wait for buy confirmation to set inTrade
+    this.pendingBuy = true;
+    this.pendingBuyTimeout = setTimeout(() => {
+      console.warn(`[${this.user.userId}] ⚠️ pending buy timed out`);
+      this._clearPendingBuy();
+    }, this.PENDING_BUY_TIMEOUT_MS);
 
-    console.log(`[TRADE] 🚀 ${direction} $${stake}`);
-    this.safeTelegram(`🚀 ${this.user.userId} | ${direction} | $${stake}`);
+    console.log(`[TRADE] 🔜 Sending buy ${direction} $${stake}`);
+    this.safeTelegram(`🔜 ${this.user.userId} | Attempting ${direction} | $${stake}`);
 
     this.send({
       buy: 1,
@@ -430,6 +510,9 @@ export class DerivBot {
         symbol: this.user.market
       }
     });
+
+    this.user.tradesToday++;
+    this.firstTradeDone = true;
   }
 
   subscribeContract() {
