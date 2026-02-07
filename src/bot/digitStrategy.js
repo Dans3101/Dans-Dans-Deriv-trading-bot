@@ -75,6 +75,8 @@ export function decideFromMonitor(monitor, {
   for (const d of [6,7,8,9]) {
     const pct = (c[d] || 0) / total * 100;
     if (pct >= sixPercentThreshold) {
+      // debug
+      console.log('[DIGIT DEBUG] abort due to 6% rule', {digit:d, pct, sixPercentThreshold});
       return null; // market biased, bail out
     }
   }
@@ -86,6 +88,21 @@ export function decideFromMonitor(monitor, {
 
   const sawEnoughLow = lowCount >= windowCheckCount;
   const isTrigger = (monitor.triggerDigits || [7,8,9]).includes(ld);
+
+  const debug = {
+    total,
+    counts: c,
+    lastDigit: ld,
+    prev,
+    lowCount,
+    sawEnoughLow,
+    isTrigger,
+    mode,
+    windowCheckCount,
+    lookbackForLow,
+    sixPercentThreshold
+  };
+  console.log('[DIGIT DEBUG]', JSON.stringify(debug));
 
   if (sawEnoughLow && isTrigger) {
     if (mode === 'OVER') return 'CALL';
