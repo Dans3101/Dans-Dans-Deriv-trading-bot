@@ -1,48 +1,47 @@
+// src/middleware/paymentGuard.js
+
 /**
- * Performance fee gate:
- * - DEMO → always allowed
- * - REAL → must pay fee after profit
+ * Simple payment/activation guard.
+ *
+ * Exports:
+ *  - canTrade(user): returns boolean. Add debug logs for why trading might be blocked.
+ *
+ * This function should be expanded to check payment/subscription/whitelist/etc.
+ * For now it checks:
+ *  - user.active === true
+ *  - user.isBlocked is not true (optional flag)
+ *  - user.apiToken exists (sanity check)
  */
 
-export function calculatePerformanceFee(startBalance, maxBalance) {
-  if (!startBalance || !maxBalance) return 0;
+export function canTrade(user = {}) {
+  try {
+    if (!user) {
+      console.log('[CANTRADE DEBUG] missing user object -> false');
+      return false;
+    }
 
-  const profit = maxBalance - startBalance;
-  if (profit <= 0) return 0;
+    // Must be marked active
+    if (!user.active) {
+      console.log(`[CANTRADE DEBUG] user=${user.userId} active=false -> cannot trade`);
+      return false;
+    }
 
-  return profit * 0.10; // 10% performance fee
-}
+    // Optional block flag
+    if (user.isBlocked) {
+      console.log(`[CANTRADE DEBUG] user=${user.userId} isBlocked=true -> cannot trade`);
+      return false;
+    }
 
-export function canTrade(user) {
-  // ✅ DEFAULT TO DEMO IF NOT SET
-  const accountType = user.accountType || 'demo';
+    // Minimal token presence
+    if (!user.apiToken) {
+      console.log(`[CANTRADE DEBUG] user=${user.userId} missing apiToken -> cannot trade`);
+      return false;
+    }
 
-  // ✅ DEMO accounts always trade
-  if (accountType === 'demo') {
+    console.log(`[CANTRADE DEBUG] user=${user.userId} canTrade=true`);
     return true;
-  }
-
-  // ⏳ Allow trading until balances are initialized
-  if (!user.startBalance || !user.maxBalance) {
-    return true;
-  }
-
-  // 🔴 REAL account fee enforcement
-  const fee = calculatePerformanceFee(
-    user.startBalance,
-    user.maxBalance
-  );
-
-  console.log(
-    `[${user.userId}] Performance fee due: $${fee.toFixed(2)}`
-  );
-
-  if (fee > 0 && !user.performanceFeePaid) {
-    console.warn(
-      `[${user.userId}] Trading locked: performance fee unpaid`
-    );
+  } catch (e) {
+    console.error('[CANTRADE DEBUG] error', e?.message || e);
     return false;
   }
-
-  return true;
 }
