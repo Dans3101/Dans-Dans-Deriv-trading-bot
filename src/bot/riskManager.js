@@ -1,94 +1,80 @@
-import { SETTINGS } from '../config/deriv.js';
+// src/bot/riskManager.js
 
-/* ================= STAKE CALCULATION ================= */
+/**
+ * Risk / stake management helpers.
+ *
+ * Exports:
+ *  - calculateStake(user): returns number (stake in USD) or null
+ *  - checkLimits(user): returns 'OK' or a string reason (e.g., 'LOW_BALANCE', 'DAILY_LIMIT')
+ *
+ * This is a conservative, easy-to-tune implementation:
+ *  - Default stake is user.baseStake (if set) or 2% of current balance with min 0.2
+ *  - checkLimits enforces a minimal balance threshold, and optional per-day trade limit.
+ */
 
-export function calculateStake(user) {
-  if (!user || !user.currentBalance || user.currentBalance <= 0) {
-    return SETTINGS.MIN_STAKE;
-  }
-
-  const {
-    RISK_PERCENT,
-    MAX_STAKE,
-    MIN_STAKE,
-    MAX_MARTINGALE_STEPS,
-    MARTINGALE_MULTIPLIER
-  } = SETTINGS;
-
-  /* ===== INITIALIZE BASE STAKE (ONCE) ===== */
-  if (user.baseStake === undefined) {
-    user.baseStake = Math.max(
-      MIN_STAKE,
-      Math.min(user.currentBalance * RISK_PERCENT, MAX_STAKE)
-    );
-
-    user.martingaleStep = 0;
-    user.lastTradeResult = null;
-  }
-
-  let stake = user.baseStake;
-
-  /* ===== APPLY MARTINGALE AFTER LOSS ===== */
-  if (user.lastTradeResult === 'LOSS') {
-    if (user.martingaleStep >= MAX_MARTINGALE_STEPS) {
-      console.warn(
-        `[${user.userId}] Martingale limit reached — resetting`
-      );
-
-      user.martingaleStep = 0;
-      stake = user.baseStake;
-    } else {
-      user.martingaleStep += 1;
-      stake =
-        user.baseStake *
-        Math.pow(MARTINGALE_MULTIPLIER, user.martingaleStep);
+export function calculateStake(user = {}) {
+  try {
+    const balance = Number(user.currentBalance || 0);
+    if (!balance || Number.isNaN(balance) || balance <= 0) {
+      console.log(`[RISK DEBUG] calculateStake -> no/invalid balance (${balance}) for user ${user.userId}`);
+      return null;
     }
+
+    // If a fixed baseStake is set on the user, prefer it (but do a sanity check)
+    if (user.baseStake && Number(user.baseStake) > 0) {
+      const bs = Number(user.baseStake);
+      console.log(`[RISK DEBUG] calculateStake -> using user.baseStake=${bs} for user ${user.userId}`);
+      return bs;
+    }
+
+    // Otherwise use a percent of balance
+    const percent = Number(user.stakePercent) || 0.02; // default 2%
+    const raw = Math.max(0.2, +(balance * percent).toFixed(2)); // minimum 0.2 USD
+    // optional per-user stake cap
+    const cap = user.maxStake ? Number(user.maxStake) : null;
+    const stake = cap ? Math.min(raw, cap) : raw;
+
+    console.log(`[RISK DEBUG] calculateStake -> balance=${balance} percent=${percent} stake=${stake} for user ${user.userId}`);
+    return stake;
+  } catch (e) {
+    console.error('[RISK DEBUG] calculateStake error', e?.message || e);
+    return null;
   }
-
-  /* ===== RESET AFTER WIN ===== */
-  if (user.lastTradeResult === 'WIN') {
-    user.martingaleStep = 0;
-    stake = user.baseStake;
-  }
-
-  /* ===== FINAL SAFETY CAPS ===== */
-  stake = Math.min(stake, MAX_STAKE);
-  stake = Math.min(stake, user.currentBalance);
-  stake = Math.max(stake, MIN_STAKE);
-
-  return Number(stake.toFixed(2));
 }
 
-/* ================= TRADING LIMITS ================= */
+export function checkLimits(user = {}) {
+  try {
+    const balance = Number(user.currentBalance || 0);
 
-export function checkLimits(user) {
-  if (!user || !user.startBalance) {
-    return 'WAITING_FOR_BALANCE';
+    // Minimal balance required to trade (default 0.2)
+    const minBalance = Number(user.minBalance) || 0.2;
+    if (balance < minBalance) {
+      console.log(`[LIMITS DEBUG] user=${user.userId} result=LOW_BALANCE balance=${balance} minBalance=${minBalance}`);
+      return 'LOW_BALANCE';
+    }
+
+    // Optional daily trades limit (if configured)
+    const maxPerDay = Number(user.maxTradesPerDay) || null;
+    if (maxPerDay && typeof user.tradesToday === 'number' && user.tradesToday >= maxPerDay) {
+      console.log(`[LIMITS DEBUG] user=${user.userId} result=DAILY_LIMIT tradesToday=${user.tradesToday} maxPerDay=${maxPerDay}`);
+      return 'DAILY_LIMIT';
+    }
+
+    // Optional stop-loss / max drawdown guard: don't trade if below allowed drawdown from startBalance/maxBalance
+    if (user.startBalance && user.maxBalance) {
+      const drawdownPctAllowed = Number(user.drawdownPctAllowed) || 50; // default 50% (very permissive)
+      const drawdown = user.startBalance ? ((user.startBalance - balance) / (user.startBalance || 1)) * 100 : 0;
+      if (drawdown >= drawdownPctAllowed) {
+        console.log(`[LIMITS DEBUG] user=${user.userId} result=DRAWDOWN_EXCEEDED drawdownPct=${drawdown} allowed=${drawdownPctAllowed}`);
+        return 'DRAWDOWN_EXCEEDED';
+      }
+    }
+
+    console.log(`[LIMITS DEBUG] user=${user.userId} result=OK balance=${balance} tradesToday=${user.tradesToday || 0}`);
+    return 'OK';
+  } catch (e) {
+    console.error('[LIMITS DEBUG] checkLimits error', e?.message || e);
+    // Fallback: block trading on unexpected error
+    return 'ERROR';
   }
-
-  const {
-    STOP_PROFIT_MULTIPLIER,
-    STOP_LOSS_PERCENT,
-    MAX_TRADES_PER_DAY
-  } = SETTINGS;
-
-  const profitTarget =
-    user.startBalance * (1 + STOP_PROFIT_MULTIPLIER);
-
-  const lossLimit =
-    user.startBalance * (1 - STOP_LOSS_PERCENT);
-
-  if (user.currentBalance >= profitTarget) {
-    return 'PROFIT_TARGET_REACHED';
-  }
-
-  if (user.currentBalance <= lossLimit) {
-    return 'LOSS_LIMIT_REACHED';
-  }
-
-  if (user.tradesToday >= MAX_TRADES_PER_DAY) {
-    return 'MAX_TRADES_REACHED';
-  }
-
-  return 'OK';
 }
