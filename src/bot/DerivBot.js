@@ -37,7 +37,7 @@ class AccumulatorBot {
     this.lastTelegramSent = now;
     try {
       const res = sendTelegramMessage(message);
-      if (res && typeof res.catch === 'function') res.catch(err => console.error('Telegram send failed (acc):', err?.message || err));
+      if (res && typeof res.catch === 'function') res.catch((err) => console.error('Telegram send failed (acc):', err?.message || err));
     } catch (err) {
       console.error('Telegram send failed (acc):', err?.message || err);
     }
@@ -53,7 +53,6 @@ class AccumulatorBot {
     let stake = this.baseStake;
     if (this.lastProfit > 0) stake = +(stake * 1.2).toFixed(2);
 
-    // Ensure user has enough balance
     const balance = Number(this.user.currentBalance || 0);
     if (balance < stake) {
       console.warn(`[${this.user.userId}] ACC placeTrade skipped: insufficient balance (${balance}) for stake ${stake}`);
@@ -199,7 +198,7 @@ export class DerivBot {
     });
 
     this.user.ws.on('error', (err) => {
-      console.error(`[${this.user.userId}] ❌ WS error`, err?.message || err);
+      console.error(`[this.user.userId] ❌ WS error`, err?.message || err);
       this._clearPendingBuy();
       this._clearPingInterval();
     });
@@ -287,23 +286,20 @@ export class DerivBot {
         break;
 
       case 'buy': {
-        // Defensive handling: data.buy might be undefined if server returned an error
         if (!data || !data.buy) {
           console.warn(`[${this.user.userId}] BUY_REPLY_MALFORMED or error:`, JSON.stringify(data));
-          // Clear pending buy so bot can continue
           this._clearPendingBuy();
           break;
         }
 
         console.log(`[${this.user.userId}] 📝 Buy accepted:`, JSON.stringify(data.buy || {}));
-        // clear pending-buy timeout and mark as inTrade only if contract_id present
+
         if (this.pendingBuyTimeout) {
           clearTimeout(this.pendingBuyTimeout);
           this.pendingBuyTimeout = null;
         }
         this.pendingBuy = false;
 
-        // Some buys may not include contract_id immediately; guard access
         const contractId = data.buy.contract_id || null;
         if (contractId) {
           this.currentContractId = contractId;
@@ -366,7 +362,6 @@ export class DerivBot {
           const calcStake = calculateStake(this.user);
           console.log(`[${this.user.userId}] calculateStake =>`, calcStake);
 
-          // Determine stake carefully and validate against balance
           const balance = Number(this.user.currentBalance || 0);
           let stake = null;
           if (calcStake && Number(calcStake) > 0) stake = Number(calcStake);
@@ -422,7 +417,8 @@ export class DerivBot {
         }
       }
     } catch (e) {
-      console.error(`[${this.user.userId}] ❌ Digit strategy error this._clearPendingBuy();
+      console.error(`[${this.user.userId}] ❌ Digit strategy error`, e?.message || e);
+      this._clearPendingBuy();
     }
 
     // Build mini-candle
@@ -605,8 +601,10 @@ export class DerivBot {
     console.log(`[RESULT] ${result} | Profit: ${profit}`);
     this.safeTelegram(`[RESULT] ${this.user.userId} | ${result} | Profit: ${profit}`);
 
-    // As an extra safety: if balance wasn't updated by 'balance' msg, update from contract if available
-    if (!this.user.currentBalance && typeof contract.sale_balance !== 'undefined') {
+    if (
+      (!this.user.currentBalance || this.user.currentBalance === 0) &&
+      typeof contract.sale_balance !== 'undefined'
+    ) {
       console.log(`[${this.user.userId}] Updating balance from contract.sale_balance: ${contract.sale_balance}`);
       this.user.currentBalance = Number(contract.sale_balance);
     }
