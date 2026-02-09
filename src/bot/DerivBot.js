@@ -16,8 +16,7 @@ import { logTrade } from '../utils/tradeLogger.js';
  * - configurable higher rate limit for tick trading
  * - WS heartbeat (ping) and safer cleanup on close/error
  * - debug logs: MSG_RAW, TICK, SEND BUY, calculateStake
- *
- * Note: sixPercentThreshold relaxed for testing to make digit strategy easier to trigger.
+ * - extra contract logging for debugging (CONTRACT_MSG, CONTRACT_UPDATE_FULL)
  */
 
 /* ================= ACCUMULATOR BOT ================= */
@@ -309,7 +308,9 @@ export class DerivBot {
         this.subscribeContract();
         break;
 
-      case 'proposal_open_contract':
+      case 'proposal_open_contract': {
+        // Log full incoming contract/proposal object for debugging
+        console.log(`[${this.user.userId}] CONTRACT_MSG:`, JSON.stringify(data.proposal_open_contract));
         // Accumulator contract update or normal contract update
         if (data.proposal_open_contract?.contract_type === 'ACCU') {
           this.accBot.handleContractUpdate(data.proposal_open_contract);
@@ -317,6 +318,7 @@ export class DerivBot {
           this.handleContractUpdate(data.proposal_open_contract);
         }
         break;
+      }
 
       default:
         // Debug: log all raw incoming messages to catch errors/rejections
@@ -545,6 +547,9 @@ export class DerivBot {
   }
 
   handleContractUpdate(contract) {
+    // Log full contract object for debugging
+    console.log(`[${this.user.userId}] CONTRACT_UPDATE_FULL:`, JSON.stringify(contract));
+
     if (!contract?.is_sold) return;
 
     const profit = Number(contract.profit);
