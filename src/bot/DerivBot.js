@@ -125,7 +125,7 @@ export class DerivBot {
   handleTick(tick) {
     if (!tick?.quote) return;
 
-    const digit = this.digitMonitor.push(tick.quote);
+    const digit = this.digitMonitor.Update(tick.quote);
 
     const direction = decideFromMonitor(this.digitMonitor, {
       mode: this.user.strategyMode || 'OVER',
