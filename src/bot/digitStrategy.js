@@ -1,56 +1,88 @@
 // src/bot/digitStrategy.js
 
-export function createDigitMonitor({ windowSize = 60 }) {
-  const digits = [];
+let lastTradeTime = 0;
+let lossStreak = 0;
+let lastEpoch = null;
+
+export function createDigitMonitor({
+  windowSize = 200 // bigger sample = better stats
+} = {}) {
+
+  const buf = [];
+
+  function add(quote, epoch) {
+
+    // prevent duplicate ticks
+    if (epoch === lastEpoch) return null;
+    lastEpoch = epoch;
+
+    const q = Number(quote);
+    if (!Number.isFinite(q)) return null;
+
+    const digit = Math.abs(Math.floor(q)) % 10;
+
+    buf.push(digit);
+    if (buf.length > windowSize) buf.shift();
+
+    return digit;
+  }
+
+  function counts() {
+    const c = Array(10).fill(0);
+    for (const d of buf) c[d]++;
+    return c;
+  }
 
   return {
-    add(price) {
-      const digit = Number(price.toString().slice(-1));
-
-      digits.push(digit);
-
-      if (digits.length > windowSize) {
-        digits.shift();
-      }
-
-      return digit;
-    },
-
-    getDigits() {
-      return digits;
-    }
+    size: () => buf.length,
+    counts,
+    lastDigit: () => buf[buf.length - 1]
   };
 }
 
 
-/* ================= STRATEGY ================= */
+export function decideFromMonitor(monitor, {
+  mode = 'OVER'
+} = {}) {
 
-export function decideFromMonitor(monitor, opts = {}) {
-  const {
-    mode = 'OVER',
-    lookbackForLow = 6,
-    sixPercentThreshold = 60
-  } = opts;
+  const COOLDOWN = 12000;
 
-  const digits = monitor.getDigits();
+  if (!monitor || monitor.size() < 100) return null;
 
-  if (digits.length < lookbackForLow) return null;
+  // cooldown
+  if (Date.now() - lastTradeTime < COOLDOWN) return null;
 
-  const recent = digits.slice(-lookbackForLow);
+  // loss protection
+  if (lossStreak >= 3) return null;
 
-  const lowCount = recent.filter(d => d <= 5).length;
-  const highCount = recent.filter(d => d >= 6).length;
+  const counts = monitor.counts();
+  const total = monitor.size();
 
-  const lowPct = (lowCount / lookbackForLow) * 100;
-  const highPct = (highCount / lookbackForLow) * 100;
+  const overDigits = counts[7] + counts[8] + counts[9];
+  const underDigits = total - overDigits;
 
-  if (mode === 'OVER' && lowPct >= sixPercentThreshold) {
-    return 'DIGITOVER';
+  const overPct = overDigits / total;
+  const underPct = underDigits / total;
+
+  console.log('[DIGIT STATS]', { overPct, underPct });
+
+  // mean reversion edge
+  if (overPct > 0.60) {
+    lastTradeTime = Date.now();
+    return 'PUT'; // too many overs → go under
   }
 
-  if (mode === 'UNDER' && highPct >= sixPercentThreshold) {
-    return 'DIGITUNDER';
+  if (underPct > 0.60) {
+    lastTradeTime = Date.now();
+    return 'CALL'; // too many unders → go over
   }
 
   return null;
+}
+
+
+// call this from bot when trade result known
+export function updateDigitResult(win) {
+  if (win) lossStreak = 0;
+  else lossStreak++;
 }
