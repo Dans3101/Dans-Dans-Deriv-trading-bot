@@ -10,11 +10,11 @@ import { canTrade } from '../middleware/paymentGuard.js';
 import { logTrade } from '../utils/tradeLogger.js';
 
 /**
- * Safe DerivBot - guards added:
- * - robust 'buy' handling (checks data.buy exists)
- * - validate stake against currentBalance before sending buys
- * - clear pendingBuy on malformed responses
- * - logs helpful debug messages
+ * DerivBot - safer handling:
+ * - Enforces minimum stake before sending buys (per-user override supported)
+ * - Increments tradesToday only after buy accepted with contract_id
+ * - Defensive buy handling and pendingBuy cleanup
+ * - Debug logs retained for diagnosis
  */
 
 /* ================= ACCUMULATOR BOT ================= */
@@ -37,7 +37,7 @@ class AccumulatorBot {
     this.lastTelegramSent = now;
     try {
       const res = sendTelegramMessage(message);
-      if (res && typeof res.catch === 'function') res.catch((err) => console.error('Telegram send failed (acc):', err?.message || err));
+      if (res && typeof res.catch === 'function') res.catch(err => console.error('Telegram send failed (acc):', err?.message || err));
     } catch (err) {
       console.error('Telegram send failed (acc):', err?.message || err);
     }
@@ -52,6 +52,11 @@ class AccumulatorBot {
 
     let stake = this.baseStake;
     if (this.lastProfit > 0) stake = +(stake * 1.2).toFixed(2);
+
+    const MIN_STAKE = Number(this.user.minStake) || 0.35;
+    if (!stake || Number.isNaN(Number(stake))) stake = MIN_STAKE;
+    stake = Math.round(Number(stake) * 100) / 100;
+    if (stake < MIN_STAKE) stake = MIN_STAKE;
 
     const balance = Number(this.user.currentBalance || 0);
     if (balance < stake) {
@@ -119,6 +124,7 @@ class AccumulatorBot {
 export class DerivBot {
   constructor(user) {
     this.user = user;
+
     this.candles = [];
     this.currentContractId = null;
     this.reconnectTimeout = null;
@@ -173,15 +179,13 @@ export class DerivBot {
       try {
         this.wsPingInterval = setInterval(() => {
           if (this.user.ws?.readyState === WebSocket.OPEN) {
-            try {
-              this.user.ws.ping();
-            } catch (e) {}
+            try { this.user.ws.ping(); } catch (e) { /* ignore */ }
           }
         }, this.WS_PING_INTERVAL_MS);
-      } catch (e) {}
+      } catch (e) { /* ignore */ }
     });
 
-    this.user.ws.on('message', (msg) => {
+    this.user.ws.on('message', msg => {
       try {
         this.handleMessage(JSON.parse(msg));
       } catch (e) {
@@ -197,8 +201,8 @@ export class DerivBot {
       this.scheduleReconnect();
     });
 
-    this.user.ws.on('error', (err) => {
-      console.error(`[this.user.userId] ❌ WS error`, err?.message || err);
+    this.user.ws.on('error', err => {
+      console.error(`[${this.user.userId}] ❌ WS error`, err?.message || err);
       this._clearPendingBuy();
       this._clearPingInterval();
     });
@@ -232,7 +236,7 @@ export class DerivBot {
     this.lastTelegramSent = now;
     try {
       const res = sendTelegramMessage(message);
-      if (res && typeof res.catch === 'function') res.catch((err) => console.error('Telegram send failed:', err?.message || err));
+      if (res && typeof res.catch === 'function') res.catch(err => console.error('Telegram send failed:', err?.message || err));
     } catch (err) {
       console.error('Telegram send failed:', err?.message || err);
     }
@@ -270,7 +274,7 @@ export class DerivBot {
       case 'ticks_history':
       case 'candles': {
         const hist = data.history || data.ticks_history || data.candles || [];
-        this.candles = (hist || []).map((h) => ({
+        this.candles = (hist || []).map(h => ({
           open: h.open,
           close: h.close,
           high: h.high,
@@ -286,8 +290,12 @@ export class DerivBot {
         break;
 
       case 'buy': {
+        // Defensive handling: data.buy might be undefined if server returned an error
         if (!data || !data.buy) {
           console.warn(`[${this.user.userId}] BUY_REPLY_MALFORMED or error:`, JSON.stringify(data));
+          if (data && data.error) {
+            console.warn(`[${this.user.userId}] BUY ERROR code=${data.error.code} message=${data.error.message}`);
+          }
           this._clearPendingBuy();
           break;
         }
@@ -305,6 +313,8 @@ export class DerivBot {
           this.currentContractId = contractId;
           this.user.inTrade = true;
           this.subscribeContract();
+          // increment trades only when buy accepted and contract_id present
+          this.user.tradesToday = (this.user.tradesToday || 0) + 1;
         } else {
           console.warn(`[${this.user.userId}] Buy accepted but no contract_id returned`, JSON.stringify(data.buy));
         }
@@ -362,11 +372,17 @@ export class DerivBot {
           const calcStake = calculateStake(this.user);
           console.log(`[${this.user.userId}] calculateStake =>`, calcStake);
 
+          const MIN_STAKE = Number(this.user.minStake) || 0.35;
           const balance = Number(this.user.currentBalance || 0);
+
           let stake = null;
           if (calcStake && Number(calcStake) > 0) stake = Number(calcStake);
           else if (this.user.baseStake && Number(this.user.baseStake) > 0) stake = Number(this.user.baseStake);
           else stake = Math.max(0.2, +(balance * (Number(this.user.stakePercent) || 0.02)).toFixed(2));
+
+          if (!stake || Number.isNaN(Number(stake))) stake = MIN_STAKE;
+          stake = Math.round(Number(stake) * 100) / 100;
+          if (stake < MIN_STAKE) stake = MIN_STAKE;
 
           if (!stake || stake <= 0) {
             console.warn(`[${this.user.userId}] Aborting buy: computed invalid stake=${stake}`);
@@ -398,21 +414,11 @@ export class DerivBot {
             this._clearPendingBuy();
           }, this.PENDING_BUY_TIMEOUT_MS);
 
-          console.log(
-            `[${this.user.userId}] SEND BUY (digit) payload:`,
-            JSON.stringify(payload),
-            'pendingBuy=',
-            this.pendingBuy,
-            'inTrade=',
-            this.user.inTrade,
-            'stake=',
-            stake
-          );
+          console.log(`[${this.user.userId}] SEND BUY (digit) payload:`, JSON.stringify(payload), 'pendingBuy=', this.pendingBuy, 'inTrade=', this.user.inTrade, 'stake=', stake);
           this.safeTelegram(`[DIGIT STRAT] ${this.user.userId} | Attempting ${direction} | $${stake} (digit ${digit})`);
 
           this.send(payload);
 
-          this.user.tradesToday++;
           this.firstTradeDone = true;
         }
       }
@@ -426,7 +432,7 @@ export class DerivBot {
     if (!firstTick) return;
 
     if (tick.epoch - firstTick.epoch >= SETTINGS.CANDLE_GRANULARITY) {
-      const quotes = this.tickBuffer.map((t) => t.quote).filter((q) => typeof q === 'number');
+      const quotes = this.tickBuffer.map(t => t.quote).filter(q => typeof q === 'number');
       const miniCandle = {
         open: firstTick.quote,
         close: tick.quote,
@@ -440,9 +446,7 @@ export class DerivBot {
 
       this.tickBuffer = [];
 
-      console.log(
-        `[${this.user.userId}] 📊 Mini-candle built: O:${miniCandle.open} H:${miniCandle.high} L:${miniCandle.low} C:${miniCandle.close}`
-      );
+      console.log(`[${this.user.userId}] 📊 Mini-candle built: O:${miniCandle.open} H:${miniCandle.high} L:${miniCandle.low} C:${miniCandle.close}`);
 
       this.tryTrade();
     }
@@ -500,7 +504,7 @@ export class DerivBot {
 
   canTradeNow() {
     const now = Date.now();
-    this.tradeTimestamps = this.tradeTimestamps.filter((ts) => now - ts < 60000);
+    this.tradeTimestamps = this.tradeTimestamps.filter(ts => now - ts < 60000);
     if (this.tradeTimestamps.length >= this.MAX_TRADES_PER_MIN) return false;
     this.tradeTimestamps.push(now);
     return true;
@@ -524,10 +528,16 @@ export class DerivBot {
     console.log(`[${this.user.userId}] calculateStake =>`, calcStake);
 
     const balance = Number(this.user.currentBalance || 0);
+    const MIN_STAKE = Number(this.user.minStake) || 0.35;
+
     let stake = null;
     if (calcStake && Number(calcStake) > 0) stake = Number(calcStake);
     else if (this.user.baseStake && Number(this.user.baseStake) > 0) stake = Number(this.user.baseStake);
     else stake = Math.max(0.2, +(balance * (Number(this.user.stakePercent) || 0.02)).toFixed(2));
+
+    if (!stake || Number.isNaN(Number(stake))) stake = MIN_STAKE;
+    stake = Math.round(Number(stake) * 100) / 100;
+    if (stake < MIN_STAKE) stake = MIN_STAKE;
 
     if (!stake || stake <= 0) {
       console.warn(`[${this.user.userId}] Aborting buy: computed invalid stake=${stake}`);
@@ -559,21 +569,11 @@ export class DerivBot {
       this._clearPendingBuy();
     }, this.PENDING_BUY_TIMEOUT_MS);
 
-    console.log(
-      `[${this.user.userId}] SEND BUY (candle) payload:`,
-      JSON.stringify(payload),
-      'pendingBuy=',
-      this.pendingBuy,
-      'inTrade=',
-      this.user.inTrade,
-      'stake=',
-      stake
-    );
+    console.log(`[${this.user.userId}] SEND BUY (candle) payload:`, JSON.stringify(payload), 'pendingBuy=', this.pendingBuy, 'inTrade=', this.user.inTrade, 'stake=', stake);
     this.safeTelegram(`🔜 ${this.user.userId} | Attempting ${direction} | $${stake}`);
 
     this.send(payload);
 
-    this.user.tradesToday++;
     this.firstTradeDone = true;
   }
 
