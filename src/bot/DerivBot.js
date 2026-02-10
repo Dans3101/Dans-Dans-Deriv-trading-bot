@@ -4,17 +4,18 @@ import WebSocket from 'ws';
 import { DERIV_WS, SETTINGS } from '../config/deriv.js';
 import { calculateStake, checkLimits } from './riskManager.js';
 import { decideTradeDirection } from './strategy.js';
-import { createDigitMonitor, '../notifications/telegram.js';
+import { createDigitMonitor, decideFromMonitor } from './digitStrategy.js';
+import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
 import { logTrade } from '../utils/tradeLogger.js';
 
 /**
- * DerivBot - updated:
- *  - digit/candle strategies separated (no simultaneous trading)
- *  - digit defaults: windowCheckCount=5, lookback=10, sixPercentThreshold=14
- *  - trades per minute default = 10
- *  - enforces min stake (user.minStake || 0.35)
- *  - increment tradesToday only when buy accepted (contract_id present)
+ * DerivBot - corrected imports and logic:
+ * - digit/candle strategies separated
+ * - digit defaults: windowCheckCount=5, lookback=10, sixPercentThreshold=14
+ * - trades per minute default = 10
+ * - enforces min stake (user.minStake || 0.35)
+ * - increment tradesToday only when buy accepted (contract_id present)
  */
 
 class AccumulatorBot {
@@ -145,7 +146,7 @@ export class DerivBot {
     this.tradeLoop = null;
 
     this.tradeTimestamps = [];
-    this.MAX_TRADES_PER_MIN = this.user.maxTradesPerMin || 10; // changed to 10
+    this.MAX_TRADES_PER_MIN = this.user.maxTradesPerMin || 10;
 
     this.accBot = new AccumulatorBot(this.user, this);
 
@@ -383,7 +384,7 @@ export class DerivBot {
             }
 
             if (balance < stake) {
-              console.warn(`[${this.user.userId}] Aborting digit buy: insufficient balance (${balance}) for stake ${stake}`);
+              console.warn(`[this.user.userId}] Aborting digit buy: insufficient balance (${balance}) for stake ${stake}`);
               return;
             }
 
@@ -485,7 +486,6 @@ export class DerivBot {
     if (this.tradeLoop) return;
 
     this.tradeLoop = setInterval(() => {
-      // Only run candle-based automatic trades (tryTrade) when market is not R_100
       const isR100 = String(this.user.market || '').toUpperCase().includes('100');
       if (!isR100 && !this.user.inTrade && !this.pendingBuy && this.user.active && canTrade(this.user)) {
         this.tryTrade();
@@ -508,7 +508,6 @@ export class DerivBot {
   }
 
   tryTrade(force = false) {
-    // prevent tryTrade running on R_100 (digit-only) markets
     const isR100 = String(this.user.market || '').toUpperCase().includes('100');
     if (isR100) return;
 
