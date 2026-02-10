@@ -3,20 +3,12 @@
 /**
  * Digit-based Over/Under strategy helper
  *
- * Exports:
- *  - createDigitMonitor(options)
- *  - decideFromMonitor(monitor, options)
- *
- * Monitor:
- *  - keeps a rolling buffer of last integer digits (Math.floor(quote) % 10)
- *  - methods: add(quote), last(n), lastDigit(), counts(), size()
- *
- * decideFromMonitor:
- *  - Checks recent low-digit frequency and trigger digit occurrence
- *  - Applies a bias check for digits 6-9 (sixPercentThreshold)
- *  - Returns 'CALL' | 'PUT' | null
- *
- * Includes conservative debug logging under '[DIGIT DEBUG]' to help diagnose why it returns null.
+ * - Keeps last-digit buffer (Math.floor(quote) % 10)
+ * - Exposes createDigitMonitor and decideFromMonitor
+ * - Defaults tuned per request:
+ *    windowCheckCount = 5
+ *    lookbackForLow   = 10
+ *    sixPercentThreshold = 14
  */
 
 export function createDigitMonitor({
@@ -26,17 +18,10 @@ export function createDigitMonitor({
 } = {}) {
   const buf = [];
 
-  function _normalizeQuote(quote) {
-    if (quote == null) return null;
-    const n = Number(quote);
-    if (Number.isNaN(n)) return null;
-    return n;
-  }
-
   function add(quote) {
-    const n = _normalizeQuote(quote);
-    if (n === null) return null;
-    const digit = Math.abs(Math.floor(n)) % 10;
+    if (quote == null || Number.isNaN(Number(quote))) return null;
+    const q = Number(quote);
+    const digit = Math.abs(Math.floor(q)) % 10;
     buf.push(digit);
     if (buf.length > windowSize) buf.shift();
     return digit;
@@ -50,18 +35,14 @@ export function createDigitMonitor({
   function counts() {
     const c = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0 };
     for (const d of buf) {
-      if (typeof d === 'number' && d >= 0 && d <= 9) c[d] = (c[d] || 0) + 1;
+      if (typeof d === 'number') c[d] = (c[d] || 0) + 1;
     }
     return c;
   }
 
-  function size() {
-    return buf.length;
-  }
+  function size() { return buf.length; }
 
-  function lastDigit() {
-    return buf.length ? buf[buf.length - 1] : null;
-  }
+  function lastDigit() { return buf.length ? buf[buf.length - 1] : null; }
 
   return {
     add,
@@ -78,15 +59,15 @@ export function createDigitMonitor({
  * Decide trade direction from monitor according to the rules:
  * - windowCheckCount: require >= this many occurrences of lowDigits in recent lookback
  * - lookbackForLow: number of previous digits to inspect for the lowDigits repetition
- * - sixPercentThreshold: percent threshold for digits 6,7,8,9 (default 10.3)
+ * - sixPercentThreshold: percent threshold for digits 6,7,8,9 (default 14)
  * - mode: 'OVER'|'UNDER' (default 'OVER') — maps trigger to CALL or PUT
  *
  * Returns 'CALL' | 'PUT' | null
  */
 export function decideFromMonitor(monitor, {
-  windowCheckCount = 4,
+  windowCheckCount = 5,
   lookbackForLow = 10,
-  sixPercentThreshold = 10.3,
+  sixPercentThreshold = 14,
   mode = 'OVER'
 } = {}) {
   try {
@@ -104,7 +85,6 @@ export function decideFromMonitor(monitor, {
       return null;
     }
 
-    // Safety: ensure config arrays exist
     const lowDigits = Array.isArray(monitor.lowDigits) ? monitor.lowDigits : [0,1,2,3,4,5,6];
     const triggerDigits = Array.isArray(monitor.triggerDigits) ? monitor.triggerDigits : [7,8,9];
 
@@ -119,9 +99,9 @@ export function decideFromMonitor(monitor, {
       }
     }
 
-    // Build lookback previous samples excluding current last digit
+    // Lookback previous samples excluding current last digit
     const lookback = Math.max(1, Math.min(lookbackForLow, totalSamples - 1));
-    const prev = monitor.last(lookback + 1).slice(0, lookback); // exclude current last
+    const prev = monitor.last(lookback + 1).slice(0, lookback);
     const lowCount = prev.filter(d => lowDigits.includes(d)).length;
 
     const sawEnoughLow = lowCount >= windowCheckCount;
