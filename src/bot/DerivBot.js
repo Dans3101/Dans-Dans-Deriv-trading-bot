@@ -10,12 +10,11 @@ import { canTrade } from '../middleware/paymentGuard.js';
 import { logTrade } from '../utils/tradeLogger.js';
 
 /**
- * DerivBot - corrected imports and logic:
- * - digit/candle strategies separated
- * - digit defaults: windowCheckCount=5, lookback=10, sixPercentThreshold=14
- * - trades per minute default = 10
- * - enforces min stake (user.minStake || 0.35)
- * - increment tradesToday only when buy accepted (contract_id present)
+ * DerivBot
+ * - AUTH_REPLY logging added
+ * - forceTrade() method added (HTTP endpoint will call this)
+ * - digit/candle separation, min stake enforcement, defensive buy handling
+ * - tradesToday increment only on buy acceptance
  */
 
 class AccumulatorBot {
@@ -256,10 +255,13 @@ export class DerivBot {
     }
   }
 
+  /* ================= MESSAGE HANDLER ================= */
   handleMessage(data) {
     switch (data.msg_type) {
       case 'authorize':
         console.log(`[${this.user.userId}] ✅ Authorized`);
+        // AUTH_REPLY log to confirm account/token details
+        console.log(`[${this.user.userId}] AUTH_REPLY:`, JSON.stringify(data));
         this.subscribeBalance();
         this.subscribeCandles();
         break;
@@ -310,6 +312,7 @@ export class DerivBot {
           this.currentContractId = contractId;
           this.user.inTrade = true;
           this.subscribeContract();
+          // increment only when buy accepted with a contract_id
           this.user.tradesToday = (this.user.tradesToday || 0) + 1;
         } else {
           console.warn(`[${this.user.userId}] Buy accepted but no contract_id returned`, JSON.stringify(data.buy));
@@ -333,6 +336,7 @@ export class DerivBot {
     }
   }
 
+  /* ================= MINI-CANDLE BUILDING & DIGIT STRAT ================= */
   handleTick(tick) {
     if (!tick?.quote || !tick?.epoch) return;
 
@@ -384,7 +388,7 @@ export class DerivBot {
             }
 
             if (balance < stake) {
-              console.warn(`[this.user.userId}] Aborting digit buy: insufficient balance (${balance}) for stake ${stake}`);
+              console.warn(`[${this.user.userId}] Aborting digit buy: insufficient balance (${balance}) for stake ${stake}`);
               return;
             }
 
@@ -450,6 +454,7 @@ export class DerivBot {
     }
   }
 
+  /* ================= BALANCE ================= */
   handleBalance(balance) {
     if (balance === undefined || balance === null) return;
     console.log(`[${this.user.userId}] 💰 Balance: ${balance}`);
@@ -482,6 +487,7 @@ export class DerivBot {
     });
   }
 
+  /* ================= CONTINUOUS TRADING LOOP ================= */
   startTradeLoop() {
     if (this.tradeLoop) return;
 
@@ -575,6 +581,77 @@ export class DerivBot {
     this.send(payload);
 
     this.firstTradeDone = true;
+  }
+
+  // Force a trade: triggers a digit buy for R_100 or a candle tryTrade(true) for others.
+  // options (optional): { direction: 'CALL'|'PUT', stake: number }
+  forceTrade(options = {}) {
+    try {
+      const isR100 = String(this.user.market || '').toUpperCase().includes('100');
+
+      // If non-R100, just call tryTrade(true) to force a candle trade
+      if (!isR100) {
+        console.log(`[${this.user.userId}] forceTrade -> forcing candle tryTrade`);
+        this.tryTrade(true);
+        return;
+      }
+
+      // For R_100, build and send a digit buy payload
+      const autoDirection = decideFromMonitor(this.digitMonitor, {
+        mode: this.user.strategyMode || 'OVER',
+        windowCheckCount: this.user.digitWindowCheckCount || 5,
+        lookbackForLow: this.user.digitLookback || 10,
+        sixPercentThreshold: this.user.digitSixPct || 14
+      });
+      const direction = options.direction || autoDirection || 'CALL';
+
+      const calcStake = calculateStake(this.user);
+      const MIN_STAKE = Number(this.user.minStake) || 0.35;
+      const balance = Number(this.user.currentBalance || 0);
+      let stake = options.stake || null;
+
+      if (!stake) {
+        if (calcStake && Number(calcStake) > 0) stake = Number(calcStake);
+        else if (this.user.baseStake && Number(this.user.baseStake) > 0) stake = Number(this.user.baseStake);
+        else stake = Math.max(MIN_STAKE, +(balance * (Number(this.user.stakePercent) || 0.02)).toFixed(2));
+      }
+
+      if (!stake || Number.isNaN(Number(stake))) stake = MIN_STAKE;
+      stake = Math.round(Number(stake) * 100) / 100;
+      if (stake < MIN_STAKE) stake = MIN_STAKE;
+
+      if (balance < stake) {
+        console.warn(`[${this.user.userId}] forceTrade aborted: insufficient balance (${balance}) for stake ${stake}`);
+        return;
+      }
+
+      const payload = {
+        buy: 1,
+        price: stake,
+        parameters: {
+          amount: stake,
+          basis: 'stake',
+          contract_type: direction,
+          currency: 'USD',
+          duration: 1,
+          duration_unit: 's',
+          symbol: this.user.market
+        }
+      };
+
+      this.pendingBuy = true;
+      this.pendingBuyTimeout = setTimeout(() => {
+        console.warn(`[${this.user.userId}] ⚠️ pending forced buy timed out`);
+        this._clearPendingBuy();
+      }, this.PENDING_BUY_TIMEOUT_MS);
+
+      console.log(`[${this.user.userId}] FORCE SEND BUY (digit) payload:`, JSON.stringify(payload), 'stake=', stake, 'direction=', direction);
+      this.safeTelegram(`[FORCE BUY] ${this.user.userId} | ${direction} | $${stake}`);
+      this.send(payload);
+      this.firstTradeDone = true;
+    } catch (err) {
+      console.error(`[${this.user.userId}] forceTrade error`, err?.message || err);
+    }
   }
 
   subscribeContract() {
