@@ -5,7 +5,7 @@
  *
  * - Keeps last-digit buffer (Math.floor(quote) % 10)
  * - Exposes createDigitMonitor and decideFromMonitor
- * - Defaults tuned per request:
+ * - Defaults tuned:
  *    windowCheckCount = 5
  *    lookbackForLow   = 10
  *    sixPercentThreshold = 14
