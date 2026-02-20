@@ -1,119 +1,89 @@
-/**
- * DollarPrinter Style Digit Strategy (Node.js Version)
- *
- * - Fixed stake
- * - Stops after 2 consecutive losses
- * - No martingale
- * - Aggressive trigger logic
- * - Designed for DIGIT OVER strategy
- */
+// src/bot/digitStrategy.js
 
-export function createDigitMonitor({
-  windowSize = 20
-} = {}) {
-
+export function createDigitMonitor({ windowSize = 100 } = {}) {
   const digits = [];
-  let consecutiveLosses = 0;
-  let stopped = false;
 
   function add(quote) {
-    if (quote == null || Number.isNaN(Number(quote))) return null;
+    if (!quote) return null;
+    const q = Number(quote);
+    if (Number.isNaN(q)) return null;
 
-    const digit = Math.abs(Math.floor(Number(quote))) % 10;
-
+    const digit = Math.abs(Math.floor(q)) % 10;
     digits.push(digit);
-    if (digits.length > windowSize) digits.shift();
+
+    if (digits.length > windowSize) {
+      digits.shift();
+    }
 
     return digit;
   }
 
-  function last(n = 1) {
-    return digits.slice(-n);
+  function getDigits() {
+    return digits;
+  }
+
+  function counts() {
+    const c = Array(10).fill(0);
+    for (const d of digits) {
+      c[d]++;
+    }
+    return c;
   }
 
   function size() {
     return digits.length;
   }
 
-  function lastDigit() {
-    return digits.length ? digits[digits.length - 1] : null;
-  }
-
-  function recordResult(isWin) {
-    if (isWin) {
-      consecutiveLosses = 0;
-    } else {
-      consecutiveLosses++;
-      if (consecutiveLosses >= 2) {
-        stopped = true;
-        console.log('🛑 Strategy stopped after 2 consecutive losses.');
-      }
-    }
-  }
-
-  function isStopped() {
-    return stopped;
-  }
-
-  function reset() {
-    consecutiveLosses = 0;
-    stopped = false;
-  }
-
   return {
     add,
-    last,
-    size,
-    lastDigit,
-    recordResult,
-    isStopped,
-    reset
+    getDigits,
+    counts,
+    size
   };
 }
 
 
 /**
- * Aggressive DollarPrinter Digit Logic
- *
- * Rules:
- * - If last 3 digits are LOW (0-4)
- * - And current digit is HIGH (7,8,9)
- * - Trade DIGIT OVER 6 (CALL)
- *
+ * Decide dynamic DIGITOVER barrier
  * Returns:
- * 'CALL' | null
+ * {
+ *   action: 'DIGITOVER',
+ *   barrier: number
+ * }
+ * or null
  */
 
 export function decideFromMonitor(monitor) {
+  if (!monitor || monitor.size() < 50) return null;
 
-  if (!monitor || monitor.isStopped()) {
-    return null;
+  const counts = monitor.counts();
+  const total = monitor.size();
+
+  // Calculate percentage appearance of each digit
+  const percentages = counts.map(c => (c / total) * 100);
+
+  // We only consider higher digits (6-9)
+  const highDigits = [6, 7, 8, 9];
+
+  // Find which of them is least frequent
+  let weakestDigit = 6;
+  let lowestPercent = 100;
+
+  for (const d of highDigits) {
+    if (percentages[d] < lowestPercent) {
+      lowestPercent = percentages[d];
+      weakestDigit = d;
+    }
   }
 
-  if (monitor.size() < 4) return null;
+  // If digit 7 is weakest,
+  // we set barrier to 6 so we win on 7,8,9
+  const barrier = weakestDigit - 1;
 
-  const lastDigits = monitor.last(4);
-  const previousThree = lastDigits.slice(0, 3);
-  const current = lastDigits[3];
+  if (barrier < 0 || barrier > 8) return null;
 
-  const lowDigits = [0,1,2,3,4];
-  const highDigits = [7,8,9];
-
-  const lowCount = previousThree.filter(d => lowDigits.includes(d)).length;
-
-  const debug = {
-    previousThree,
-    current,
-    lowCount
+  return {
+    action: 'DIGITOVER',
+    barrier
   };
-
-  console.log('[DOLLARPRINTER DEBUG]', JSON.stringify(debug));
-
-  // Aggressive trigger condition
-  if (lowCount >= 2 && highDigits.includes(current)) {
-    console.log('🚀 SIGNAL: DIGIT OVER');
-    return 'CALL';   // Use with DIGITOVER contract
-  }
-
-  return null;
 }
