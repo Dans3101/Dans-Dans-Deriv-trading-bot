@@ -1,10 +1,16 @@
 // src/bot/digitStrategy.js
 
-export function createDigitMonitor({ windowSize = 100 } = {}) {
-  const digits = [];
+export function createDigitStrategy({
+  windowSize = 100
+} = {}) {
 
-  function add(quote) {
+  const digits = [];
+  let consecutiveLosses = 0;
+  let pauseUntil = 0;
+
+  function addTick(quote) {
     if (!quote) return null;
+
     const q = Number(quote);
     if (Number.isNaN(q)) return null;
 
@@ -18,72 +24,72 @@ export function createDigitMonitor({ windowSize = 100 } = {}) {
     return digit;
   }
 
-  function getDigits() {
-    return digits;
-  }
-
   function counts() {
     const c = Array(10).fill(0);
-    for (const d of digits) {
-      c[d]++;
-    }
+    for (const d of digits) c[d]++;
     return c;
   }
 
-  function size() {
-    return digits.length;
+  function isPaused() {
+    return Date.now() < pauseUntil;
   }
 
-  return {
-    add,
-    getDigits,
-    counts,
-    size
-  };
-}
+  function onResult(result) {
+    if (result === 'win') {
+      consecutiveLosses = 0;
+      return;
+    }
 
+    if (result === 'loss') {
+      consecutiveLosses++;
 
-/**
- * Decide dynamic DIGITOVER barrier
- * Returns:
- * {
- *   action: 'DIGITOVER',
- *   barrier: number
- * }
- * or null
- */
+      if (consecutiveLosses === 1) {
+        pauseUntil = Date.now() + 30000; // 30 seconds
+        console.log('⚠️ One loss → Pausing 30 seconds');
+      }
 
-export function decideFromMonitor(monitor) {
-  if (!monitor || monitor.size() < 50) return null;
-
-  const counts = monitor.counts();
-  const total = monitor.size();
-
-  // Calculate percentage appearance of each digit
-  const percentages = counts.map(c => (c / total) * 100);
-
-  // We only consider higher digits (6-9)
-  const highDigits = [6, 7, 8, 9];
-
-  // Find which of them is least frequent
-  let weakestDigit = 6;
-  let lowestPercent = 100;
-
-  for (const d of highDigits) {
-    if (percentages[d] < lowestPercent) {
-      lowestPercent = percentages[d];
-      weakestDigit = d;
+      if (consecutiveLosses >= 2) {
+        pauseUntil = Date.now() + 60000; // 1 minute
+        consecutiveLosses = 0; // reset after big pause
+        console.log('🛑 Two consecutive losses → Pausing 60 seconds');
+      }
     }
   }
 
-  // If digit 7 is weakest,
-  // we set barrier to 6 so we win on 7,8,9
-  const barrier = weakestDigit - 1;
+  function decide() {
+    if (isPaused()) return null;
+    if (digits.length < 50) return null;
 
-  if (barrier < 0 || barrier > 8) return null;
+    const c = counts();
+    const total = digits.length;
+
+    const percentages = c.map(v => (v / total) * 100);
+
+    const highDigits = [6, 7, 8, 9];
+
+    let weakestDigit = 6;
+    let lowestPercent = 100;
+
+    for (const d of highDigits) {
+      if (percentages[d] < lowestPercent) {
+        lowestPercent = percentages[d];
+        weakestDigit = d;
+      }
+    }
+
+    const barrier = weakestDigit - 1;
+
+    if (barrier < 0 || barrier > 8) return null;
+
+    return {
+      contract_type: "DIGITOVER",
+      barrier
+    };
+  }
 
   return {
-    action: 'DIGITOVER',
-    barrier
+    addTick,
+    decide,
+    onResult
   };
 }
