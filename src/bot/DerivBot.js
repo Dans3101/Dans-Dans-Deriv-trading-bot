@@ -4,7 +4,7 @@ import WebSocket from 'ws';
 import { DERIV_WS, SETTINGS } from '../config/deriv.js';
 import { calculateStake, checkLimits } from './riskManager.js';
 import { decideTradeDirection } from './strategy.js';
-import { createDigitMonitor, decideFromMonitor } from './digitStrategy.js';
+import { createDigitStrategy } from './digitStrategy.js';
 import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
 import { logTrade } from '../utils/tradeLogger.js';
