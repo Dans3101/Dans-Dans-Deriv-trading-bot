@@ -9,7 +9,9 @@ export const SETTINGS = {
   // Base risk per trade (before martingale)
   RISK_PERCENT: 0.05,            // 5% of balance
   MAX_STAKE: 100,                // Absolute Deriv safety cap
-  MIN_STAKE: 0.35,               // Deriv minimum stake
+  MIN_STAKE: 0.31,               // Minimum stake to use (changed from 0.35 to 0.31)
+  // Optional application-level max stake (we'll use 1.00 as requested)
+  MAX_STAKE_LIMIT: 1.00,
 
   MAX_TRADES_PER_DAY: 15,
 
@@ -20,7 +22,7 @@ export const SETTINGS = {
 
   /* ================= TRADING CONFIG ================= */
 
-  CANDLE_GRANULARITY: 60,        // 1-minute candles
+  CANDLE_GRANULARITY: 2,         // 2-second mini-candles for testing (was 60)
   CANDLE_COUNT: 30,
 
   /* ================= MARTINGALE ================= */
@@ -35,4 +37,4 @@ export const SETTINGS = {
  */
 export const DERIV_WS = (appId) => {
   return `wss://ws.derivws.com/websockets/v3?app_id=${appId}`;
-};
+}
