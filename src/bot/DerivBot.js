@@ -11,10 +11,14 @@ import { logTrade } from '../utils/tradeLogger.js';
 
 /**
  * DerivBot
- * - AUTH_REPLY logging added
- * - forceTrade() method added (HTTP endpoint will call this)
- * - digit/candle separation, min stake enforcement, defensive buy handling
- * - tradesToday increment only on buy acceptance
+ * - AUTH_REPLY logging included
+ * - forceTrade() method included
+ * - digit/candle separation
+ * - stake clamped to per-user [minStake, maxStake] (defaults: 0.31..1.00)
+ * - increments tradesToday only after buy accepted
+ * - safer Telegram send calls (catch)
+ *
+ * NOTE: If you also want global unhandledRejection handling, add it in your index.js entry.
  */
 
 class AccumulatorBot {
@@ -35,10 +39,10 @@ class AccumulatorBot {
     if (now - this.lastTelegramSent < this.telegramInterval) return;
     this.lastTelegramSent = now;
     try {
-      const res = sendTelegramMessage(message);
-      if (res && typeof res.catch === 'function') res.catch(err => console.error('Telegram send failed (acc):', err?.message || err));
+      const p = sendTelegramMessage(message);
+      if (p && typeof p.catch === 'function') p.catch(err => console.warn('Telegram send failed (acc):', err?.message || err));
     } catch (err) {
-      console.error('Telegram send failed (acc):', err?.message || err);
+      console.warn('Telegram send failed (acc):', err?.message || err);
     }
   }
 
@@ -49,13 +53,18 @@ class AccumulatorBot {
     const limits = checkLimits(this.user);
     if (limits !== 'OK') return;
 
+    // base stake logic
     let stake = this.baseStake;
     if (this.lastProfit > 0) stake = +(stake * 1.2).toFixed(2);
 
-    const MIN_STAKE = Number(this.user.minStake) || 0.35;
+    // per-user min/max stake (defaults)
+    const MIN_STAKE = Number(this.user.minStake) || 0.31;
+    const MAX_STAKE = Number(this.user.maxStake) || 1.0;
+
     if (!stake || Number.isNaN(Number(stake))) stake = MIN_STAKE;
     stake = Math.round(Number(stake) * 100) / 100;
     if (stake < MIN_STAKE) stake = MIN_STAKE;
+    if (stake > MAX_STAKE) stake = MAX_STAKE;
 
     const balance = Number(this.user.currentBalance || 0);
     if (balance < stake) {
@@ -99,7 +108,7 @@ class AccumulatorBot {
 
     if (profit < 0) {
       this.cooldown = true;
-      setTimeout(() => this.cooldown = false, 2 * 60 * 1000);
+      setTimeout(() => (this.cooldown = false), 2 * 60 * 1000);
     }
 
     this.lastProfit = profit;
@@ -177,10 +186,16 @@ export class DerivBot {
       try {
         this.wsPingInterval = setInterval(() => {
           if (this.user.ws?.readyState === WebSocket.OPEN) {
-            try { this.user.ws.ping(); } catch (e) { /* ignore */ }
+            try {
+              this.user.ws.ping();
+            } catch (e) {
+              // ignore
+            }
           }
         }, this.WS_PING_INTERVAL_MS);
-      } catch (e) { /* ignore */ }
+      } catch (e) {
+        // ignore
+      }
     });
 
     this.user.ws.on('message', msg => {
@@ -233,10 +248,10 @@ export class DerivBot {
     if (now - this.lastTelegramSent < this.telegramInterval) return;
     this.lastTelegramSent = now;
     try {
-      const res = sendTelegramMessage(message);
-      if (res && typeof res.catch === 'function') res.catch(err => console.error('Telegram send failed:', err?.message || err));
+      const p = sendTelegramMessage(message);
+      if (p && typeof p.catch === 'function') p.catch(err => console.warn('Telegram send failed:', err?.message || err));
     } catch (err) {
-      console.error('Telegram send failed:', err?.message || err);
+      console.warn('Telegram send failed:', err?.message || err);
     }
   }
 
@@ -370,17 +385,19 @@ export class DerivBot {
             const calcStake = calculateStake(this.user);
             console.log(`[${this.user.userId}] calculateStake =>`, calcStake);
 
-            const MIN_STAKE = Number(this.user.minStake) || 0.35;
+            const MIN_STAKE = Number(this.user.minStake) || 0.31;
+            const MAX_STAKE = Number(this.user.maxStake) || 1.0;
             const balance = Number(this.user.currentBalance || 0);
 
             let stake = null;
             if (calcStake && Number(calcStake) > 0) stake = Number(calcStake);
             else if (this.user.baseStake && Number(this.user.baseStake) > 0) stake = Number(this.user.baseStake);
-            else stake = Math.max(MIN_STAKE, +(balance * (Number(this.user.stakePercent) || 0.02)).toFixed(2));
+            else stake = +(balance * (Number(this.user.stakePercent) || 0.02)).toFixed(2);
 
             if (!stake || Number.isNaN(Number(stake))) stake = MIN_STAKE;
             stake = Math.round(Number(stake) * 100) / 100;
             if (stake < MIN_STAKE) stake = MIN_STAKE;
+            if (stake > MAX_STAKE) stake = MAX_STAKE;
 
             if (!stake || stake <= 0) {
               console.warn(`[${this.user.userId}] Aborting digit buy: computed invalid stake=${stake}`);
@@ -534,16 +551,18 @@ export class DerivBot {
     console.log(`[${this.user.userId}] calculateStake =>`, calcStake);
 
     const balance = Number(this.user.currentBalance || 0);
-    const MIN_STAKE = Number(this.user.minStake) || 0.35;
+    const MIN_STAKE = Number(this.user.minStake) || 0.31;
+    const MAX_STAKE = Number(this.user.maxStake) || 1.0;
 
     let stake = null;
     if (calcStake && Number(calcStake) > 0) stake = Number(calcStake);
     else if (this.user.baseStake && Number(this.user.baseStake) > 0) stake = Number(this.user.baseStake);
-    else stake = Math.max(MIN_STAKE, +(balance * (Number(this.user.stakePercent) || 0.02)).toFixed(2));
+    else stake = +(balance * (Number(this.user.stakePercent) || 0.02)).toFixed(2);
 
     if (!stake || Number.isNaN(Number(stake))) stake = MIN_STAKE;
     stake = Math.round(Number(stake) * 100) / 100;
     if (stake < MIN_STAKE) stake = MIN_STAKE;
+    if (stake > MAX_STAKE) stake = MAX_STAKE;
 
     if (!stake || stake <= 0) {
       console.warn(`[${this.user.userId}] Aborting buy: computed invalid stake=${stake}`);
@@ -606,19 +625,21 @@ export class DerivBot {
       const direction = options.direction || autoDirection || 'CALL';
 
       const calcStake = calculateStake(this.user);
-      const MIN_STAKE = Number(this.user.minStake) || 0.35;
+      const MIN_STAKE = Number(this.user.minStake) || 0.31;
+      const MAX_STAKE = Number(this.user.maxStake) || 1.0;
       const balance = Number(this.user.currentBalance || 0);
       let stake = options.stake || null;
 
       if (!stake) {
         if (calcStake && Number(calcStake) > 0) stake = Number(calcStake);
         else if (this.user.baseStake && Number(this.user.baseStake) > 0) stake = Number(this.user.baseStake);
-        else stake = Math.max(MIN_STAKE, +(balance * (Number(this.user.stakePercent) || 0.02)).toFixed(2));
+        else stake = +(balance * (Number(this.user.stakePercent) || 0.02)).toFixed(2);
       }
 
       if (!stake || Number.isNaN(Number(stake))) stake = MIN_STAKE;
       stake = Math.round(Number(stake) * 100) / 100;
       if (stake < MIN_STAKE) stake = MIN_STAKE;
+      if (stake > MAX_STAKE) stake = MAX_STAKE;
 
       if (balance < stake) {
         console.warn(`[${this.user.userId}] forceTrade aborted: insufficient balance (${balance}) for stake ${stake}`);
