@@ -1,4 +1,4 @@
-// src/bot/digitStrategy.js
+import createDigitStrategy from './digitStrategy.js';// src/bot/digitStrategy.js
 
 export function createDigitMonitor({
   windowSize = 100
@@ -74,16 +74,17 @@ export function decideFromMonitor(monitor) {
 
   if (!monitor) return null;
   if (monitor.isPaused()) return null;
-  if (monitor.size() < 60) return null; // stronger buffer
+  if (monitor.size() < 50) return null;
 
   const c = monitor.counts();
   const total = monitor.size();
 
   const percentages = c.map(v => (v / total) * 100);
 
+  // Only high digits for dynamic barrier
   const highDigits = [6, 7, 8, 9];
 
-  let weakestDigit = null;
+  let weakestDigit = 6;
   let lowestPercent = 100;
 
   for (const d of highDigits) {
@@ -93,9 +94,6 @@ export function decideFromMonitor(monitor) {
     }
   }
 
-  // only trade if imbalance is strong
-  if (lowestPercent > 7) return null;
-
   const barrier = weakestDigit - 1;
 
   if (barrier < 0 || barrier > 8) return null;
@@ -104,4 +102,4 @@ export function decideFromMonitor(monitor) {
     contract_type: "DIGITOVER",
     barrier
   };
-}}
+}
