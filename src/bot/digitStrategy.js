@@ -1,4 +1,4 @@
-import createDigitStrategy from './digitStrategy.js';// src/bot/digitStrategy.js
+// src/bot/digitStrategy.js
 
 export function createDigitMonitor({
   windowSize = 100
