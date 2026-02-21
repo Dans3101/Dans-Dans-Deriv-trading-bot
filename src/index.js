@@ -17,7 +17,7 @@ const PORT = process.env.PORT || 3000;
 /* ================= CONFIGURATION ================= */
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 const PAYMENT_NUMBER = "0713811622"; 
-const HELP_LINK = "https://bit.ly/4tJbxpH"; 
+const HELP_LINK = "https://wa.me/message/WW67ZG52UQHOO1"; 
 const SUB_PRICE = "100 KSH";
 const DURATION = "7 Days (1 Week)";
 
