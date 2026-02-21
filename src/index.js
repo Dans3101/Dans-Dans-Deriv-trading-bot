@@ -1,81 +1,86 @@
 import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
 import express from 'express';
-import bodyParser from 'body-parser';
+import { fileURLToPath } from 'url';
 import { UserSession } from './users/userSession.js';
 import { DerivBot } from './bot/DerivBot.js';
 import { listenTelegramAdmin } from './notifications/telegramAdmin.js';
 
-/* ================= SERVER ================= */
+/* ================= RENDER KEEP-ALIVE SERVER ================= */
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(bodyParser.json());
+app.get('/', (req, res) => res.send('✅ Deriv trading bot server is now running on Render and is live you can now return to Telegram to control the Bot'));
+app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 
-export const bots = new Map();
+/* ================= LOAD USERS ================= */
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const usersFilePath = path.join(__dirname, '../users.json');
 
-/* ================= HOMEPAGE ================= */
-app.get('/', (req, res) => {
-  res.send(`
-    <h2>🚀 Connect Your Deriv Account</h2>
-    <form method="POST" action="/start">
-      <label>Enter Deriv API Token:</label><br><br>
-      <input type="text" name="apiToken" required style="width:300px;" />
-      <br><br>
-      <button type="submit">Start Bot</button>
-    </form>
-  `);
-});
-
-/* ================= START BOT ROUTE ================= */
-app.post('/start', async (req, res) => {
-  const { apiToken } = req.body;
-
-  if (!apiToken) {
-    return res.send("❌ API Token is required");
-  }
-
-  const userId = `user_${Date.now()}`;
-
-  try {
-    const session = new UserSession({
-      userId,
-      apiToken,
-      market: 'R_10', // YOUR PURE DIGIT MARKET
-      stake: 1,
-      active: true
-    });
-
-    const bot = new DerivBot(session);
-
-    await new Promise(resolve => {
-      bot.connect();
-      bot.user.ws.on('open', resolve);
-    });
-
-    bots.set(userId, bot);
-
-    res.send(`
-      ✅ Bot started successfully!<br><br>
-      User ID: ${userId}<br><br>
-      You can now close this page.
-    `);
-
-    console.log(`✅ New user connected: ${userId}`);
-
-  } catch (err) {
-    console.error(err);
-    res.send("❌ Failed to start bot. Check your token.");
-  }
-});
-
-/* ================= TELEGRAM ADMIN ================= */
-if (!global.telegramStarted) {
-  global.telegramStarted = true;
-  listenTelegramAdmin(bots);
+let usersData;
+try {
+  usersData = JSON.parse(fs.readFileSync(usersFilePath, 'utf8'));
+} catch (err) {
+  console.error('❌ Failed to load users.json:', err.message);
+  process.exit(1);
 }
 
-/* ================= START SERVER ================= */
-app.listen(PORT, () => {
-  console.log(`🌐 Web server running on port ${PORT}`);
-});
+const users = (usersData.users || []).filter(u => u.active);
+if (users.length === 0) {
+  console.error('❌ No active users found in users.json');
+  process.exit(1);
+}
+console.log(`📂 Loaded ${users.length} active user(s)`);
+
+/* ================= BOT STORAGE ================= */
+export const bots = new Map(); // userId → DerivBot instance
+
+/* ================= START BOTS ================= */
+async function startBots() {
+  console.log('🚀 Starting Deriv bots...');
+
+  for (const userData of users) {
+    try {
+      const apiToken = userData.apiToken?.startsWith('ENV:')
+        ? process.env[userData.apiToken.replace('ENV:', '')]
+        : userData.apiToken;
+
+      if (!apiToken) {
+        console.error(`❌ Missing API token for ${userData.userId}`);
+        continue;
+      }
+
+      // Ensure market is set
+      if (!userData.market) {
+        userData.market = 'R_50';
+        console.log(`[${userData.userId}] Market set to default: ${userData.market}`);
+      }
+
+      const session = new UserSession({ ...userData, apiToken });
+      const bot = new DerivBot(session);
+
+      // Await bot connection to ensure proper startup
+      await new Promise(resolve => {
+        bot.connect();
+        bot.user.ws.on('open', resolve);
+      });
+
+      bots.set(userData.userId, bot);
+      console.log(`✅ Bot started for ${userData.userId}`);
+    } catch (err) {
+      console.error(`❌ Failed to start bot for ${userData.userId}:`, err.message);
+    }
+  }
+
+  // Start Telegram Admin only once
+  if (!global.telegramStarted) {
+    global.telegramStarted = true;
+    console.log('🤖 Starting Telegram Admin...');
+    listenTelegramAdmin(bots);
+  }
+}
+
+// Delay slightly to allow server to fully initialize
+setTimeout(startBots, 3000);
