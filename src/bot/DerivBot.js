@@ -744,5 +744,3 @@ logTrade({
 
 }
 }
-
-Here it is edit it and please don't changes anything  else apart from the above mentioned
