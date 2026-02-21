@@ -1,181 +1,249 @@
-import 'dotenv/config';
-import express from 'express';
-import { fileURLToPath } from 'url';
-import path from 'path';
-import { UserSession } from './users/userSession.js';
-import { DerivBot, bots } from './bot/DerivBot.js';
+import WebSocket from 'ws';
+import { DERIV_WS, SETTINGS } from '../config/deriv.js';
+import { checkLimits } from './riskManager.js';
+import { decideTradeDirection } from './strategy.js';
+import { createDigitMonitor, decideFromMonitor } from './digitStrategy.js';
+import { sendTelegramMessage } from '../notifications/telegram.js';
+import { canTrade } from '../middleware/paymentGuard.js';
+import { logTrade } from '../utils/tradeLogger.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+class AccumulatorBot {
+  constructor(user, parentBot = null) {
+    this.user = user;
+    this.bot = parentBot;
+    this.inTrade = false;
+    this.currentContractId = null;
+    this.lastTelegramSent = 0;
+    this.telegramInterval = 2000;
+  }
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+  safeTelegram(message) {
+    const now = Date.now();
+    if (now - this.lastTelegramSent < this.telegramInterval) return;
+    this.lastTelegramSent = now;
+    try {
+      const p = sendTelegramMessage(message);
+      if (p && typeof p.catch === 'function') p.catch(err => console.warn('Telegram send failed (acc):', err?.message || err));
+    } catch (err) {
+      console.warn('Telegram send failed (acc):', err?.message || err);
+    }
+  }
 
-/* ================= CONFIGURATION ================= */
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
-const PAYMENT_NUMBER = "0713811622"; 
-const HELP_LINK = "https://bit.ly/4tJbxpH"; 
-const SUB_PRICE = "100 KSH";
+  placeTrade() {
+    if (!this.user.active || this.inTrade || !canTrade(this.user)) return;
+    if (this.bot && (this.bot.pendingBuy || this.user.inTrade)) return;
 
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+    // Use Manual Stake from User Session
+    const stake = Number(this.user.manualStake) || 0.35;
+    const balance = Number(this.user.currentBalance || 0);
 
-const pendingUsers = new Map(); 
+    if (balance < stake) {
+      console.warn(`[${this.user.userId}] ACC skipped: Low balance for manual stake $${stake}`);
+      return;
+    }
 
-/* ================= BOT BOOT LOGIC ================= */
-async function bootBot(userData) {
-  if (bots.has(userData.userId)) return;
-  userData.manualStake = parseFloat(userData.manualStake) || 0.35;
-  
-  const session = new UserSession(userData);
-  const bot = new DerivBot(session);
-  bot.connect();
-  bots.set(userData.userId, bot);
-}
+    this.inTrade = true;
+    const payload = {
+      buy: 1,
+      price: stake,
+      parameters: {
+        amount: stake,
+        basis: 'stake',
+        contract_type: 'ACCU',
+        currency: 'USD',
+        duration: 1,
+        duration_unit: 'm',
+        symbol: this.user.market
+      }
+    };
 
-/* ================= UI GENERATORS ================= */
+    if (this.user.ws?.readyState === WebSocket.OPEN) {
+      this.user.ws.send(JSON.stringify(payload));
+      this.safeTelegram(`🚀 ${this.user.userId} | Accumulator | $${stake}`);
+    } else {
+      this.inTrade = false;
+    }
+  }
 
-function generateDigitGraph(bot) {
-  if (!bot.digitMonitor || !bot.digitMonitor.getStats) return '<small>Awaiting Data...</small>';
-  
-  const stats = bot.digitMonitor.getStats();
-  let graphHtml = '<div style="display: flex; align-items: flex-end; height: 50px; gap: 2px; padding: 5px; background: #f0f0f0; border-radius: 4px; width:150px;">';
-  
-  stats.percentages.forEach((pct, digit) => {
-    // Green if cold (good for Over), Red if hot
-    const color = pct < 9 ? '#27ae60' : (pct > 13 ? '#e74c3c' : '#bdc3c7');
-    const height = Math.min(Math.max(pct * 2, 2), 45); 
-    graphHtml += `<div style="flex: 1; height: ${height}px; background: ${color};" title="Digit ${digit}: ${pct}%"></div>`;
-  });
-  
-  graphHtml += '</div>';
-  return graphHtml;
-}
-
-function generateStaffPerformanceTable() {
-  if (bots.size === 0) return '<tr><td colspan="5" style="text-align:center; padding:15px; color:#888;">No active bots.</td></tr>';
-  let rows = "";
-  bots.forEach((bot, id) => {
-    const balance = bot.user?.currentBalance || 0;
-    const profit = (balance - (bot.user?.startBalance || balance)).toFixed(2);
-    const profitColor = profit >= 0 ? "#27ae60" : "#e74c3c";
+  handleContractUpdate(contract) {
+    if (!contract?.is_sold) return;
+    this.inTrade = false;
+    this.currentContractId = null;
+    const profit = Number(contract.profit);
     
-    rows += `
-      <tr>
-        <td style="padding:10px;"><b>${id}</b><br><small>Stake: $${bot.user.manualStake}</small></td>
-        <td style="font-weight:bold;">$${Number(balance).toFixed(2)}</td>
-        <td style="color:${profitColor}; font-weight:bold;">$${profit}</td>
-        <td>${generateDigitGraph(bot)}</td>
-        <td>
-          <form action="/delete" method="POST" style="margin:0;">
-            <input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}">
-            <button type="submit" style="background:#ff4757; color:white; border:none; padding:5px 10px; border-radius:4px; cursor:pointer;">Stop</button>
-          </form>
-        </td>
-      </tr>`;
-  });
-  return rows;
+    logTrade({
+      userId: this.user.userId,
+      market: this.user.market,
+      direction: 'ACCUMULATOR',
+      stake: contract.buy_price || 0,
+      profit,
+      balance: this.user.currentBalance
+    });
+  }
 }
 
-/* ================= ROUTES ================= */
+export class DerivBot {
+  constructor(user) {
+    this.user = user;
+    this.candles = [];
+    this.currentContractId = null;
+    this.user.active = false;
+    this.user.inTrade = false;
+    this.user.startBalance = 0;
+    this.user.currentBalance = 0;
+    this.user.tradesToday = 0;
+    this.tickBuffer = [];
+    this.tradeTimestamps = [];
+    this.MAX_TRADES_PER_MIN = this.user.maxTradesPerMin || 10;
+    
+    this.accBot = new AccumulatorBot(this.user, this);
+    this.digitMonitor = createDigitMonitor({ windowSize: 60 });
+    
+    this.pendingBuy = false;
+    this.PENDING_BUY_TIMEOUT_MS = 5000;
+    this.WS_PING_INTERVAL_MS = 15000;
 
-app.get('/', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Dans-Dans Bot</title>
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <style>
-        body { font-family: sans-serif; background: #f4f7f6; padding: 20px; text-align: center; }
-        .card { background: white; max-width: 400px; margin: auto; padding: 25px; border-radius: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
-        input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
-        .btn { background: #d91e18; color: white; padding: 15px; width: 100%; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h1>Dans-Dans Bot</h1>
-        <form action="/payment-page" method="POST">
-          <input type="text" name="apiToken" placeholder="Deriv API Token" required>
-          <input type="number" name="manualStake" placeholder="Enter Stake (e.g. 0.35)" step="0.01" min="0.35" required>
-          <button type="submit" class="btn">Connect & Pay</button>
-        </form>
-        <div style="margin-top:20px;"><a href="/admin-login" style="color:#ccc; text-decoration:none; font-size:11px;">Staff Portal</a></div>
-      </div>
-    </body>
-    </html>
-  `);
-});
-
-app.post('/payment-page', (req, res) => {
-  const { apiToken, manualStake } = req.body;
-  const tempId = `User_${Math.floor(1000 + Math.random() * 9000)}`;
-  pendingUsers.set(tempId, { apiToken, manualStake });
-  res.send(`
-    <div style="font-family:sans-serif; text-align:center; padding:50px;">
-      <h2>Confirm Payment</h2>
-      <p>Pay <b>${SUB_PRICE}</b> to: <b>${PAYMENT_NUMBER}</b></p>
-      <p>Your ID: <b>${tempId}</b></p>
-      <a href="${HELP_LINK}" style="background:#2c3e50; color:white; padding:15px; text-decoration:none; border-radius:10px;">I Have Paid</a>
-    </div>
-  `);
-});
-
-app.get('/admin-login', (req, res) => {
-  res.send(`<form action="/admin-portal" method="POST" style="text-align:center; margin-top:100px;">
-    <input type="password" name="password" placeholder="Admin Password">
-    <button type="submit">Login</button>
-  </form>`);
-});
-
-app.post('/admin-portal', (req, res) => {
-  if (req.body.password !== ADMIN_PASSWORD) return res.send("Denied");
-  let pendingRows = "";
-  pendingUsers.forEach((data, id) => {
-    pendingRows += `<tr><td>${id} ($${data.manualStake})</td><td>
-    <form action="/manual-activate" method="POST"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button>Approve</button></form></td></tr>`;
-  });
-
-  res.send(`
-    <body style="font-family:sans-serif; padding:20px; background:#f0f2f5;">
-      <script>setTimeout(() => { document.getElementById('refresh-form').submit(); }, 8000);</script>
-      <form id="refresh-form" action="/admin-portal" method="POST" style="display:none;"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"></form>
-      <div style="max-width:1000px; margin:auto; background:white; padding:20px; border-radius:12px;">
-        <h2>🛡️ Staff Dashboard</h2>
-        <div style="display:grid; grid-template-columns: 1fr 2fr; gap:20px;">
-          <table border="1" width="100%" style="border-collapse:collapse;">
-            <tr style="background:#eee;"><th>Pending</th><th>Action</th></tr>
-            ${pendingRows || '<tr><td colspan="2">None</td></tr>'}
-          </table>
-          <table border="1" width="100%" style="border-collapse:collapse;">
-            <tr style="background:#eee;"><th>User</th><th>Balance</th><th>Profit</th><th>Digit Distribution</th><th>Action</th></tr>
-            ${generateStaffPerformanceTable()}
-          </table>
-        </div>
-      </div>
-    </body>
-  `);
-});
-
-app.post('/manual-activate', async (req, res) => {
-  const { userId, password } = req.body;
-  if (password === ADMIN_PASSWORD && pendingUsers.has(userId)) {
-    const data = pendingUsers.get(userId);
-    await bootBot({ userId, apiToken: data.apiToken, manualStake: data.manualStake, market: 'R_100', active: true });
-    pendingUsers.delete(userId);
-    res.send("Activated. <a href='/admin-login'>Back</a>");
+    if (!this.user.market) this.user.market = 'R_100';
   }
-});
 
-app.post('/delete', (req, res) => {
-  const { userId, password } = req.body;
-  if (password === ADMIN_PASSWORD && bots.has(userId)) {
-    const bot = bots.get(userId);
-    if (bot.user?.ws) bot.user.ws.terminate();
-    bots.delete(userId);
+  connect() {
+    const appId = process.env.DERIV_APP_ID || 1089;
+    this.user.ws = new WebSocket(DERIV_WS(appId));
+    this.user.ws.on('open', () => {
+      this.authorize();
+      this.startTradeLoop();
+      this.startAccumulatorLoop();
+      this.wsPingInterval = setInterval(() => {
+        if (this.user.ws?.readyState === WebSocket.OPEN) this.user.ws.ping();
+      }, this.WS_PING_INTERVAL_MS);
+    });
+    this.user.ws.on('message', msg => this.handleMessage(JSON.parse(msg)));
+    this.user.ws.on('close', () => {
+      this.user.active = false;
+      this._clearPendingBuy();
+      setTimeout(() => this.connect(), 5000);
+    });
   }
-  res.send("Deleted. <a href='/admin-login'>Back</a>");
-});
 
-app.listen(PORT, () => console.log(`Server on ${PORT}`));
+  authorize() {
+    this.send({ authorize: this.user.apiToken });
+  }
+
+  handleMessage(data) {
+    switch (data.msg_type) {
+      case 'authorize':
+        this.subscribeBalance();
+        this.subscribeCandles();
+        break;
+      case 'balance':
+        this.handleBalance(data.balance?.balance);
+        break;
+      case 'tick':
+        this.handleTick(data.tick);
+        break;
+      case 'buy':
+        this._clearPendingBuy();
+        if (data.buy?.contract_id) {
+          this.currentContractId = data.buy.contract_id;
+          this.user.inTrade = true;
+          this.subscribeContract();
+          this.user.tradesToday++;
+        }
+        break;
+      case 'proposal_open_contract':
+        if (data.proposal_open_contract?.contract_type === 'ACCU') {
+          this.accBot.handleContractUpdate(data.proposal_open_contract);
+        } else {
+          this.handleContractUpdate(data.proposal_open_contract);
+        }
+        break;
+    }
+  }
+
+  handleTick(tick) {
+    if (!tick?.quote) return;
+    const digit = this.digitMonitor.add(tick.quote);
+
+    const isR100 = String(this.user.market).includes('100');
+    if (isR100) {
+      // Use the hardened strategy logic
+      const result = decideFromMonitor(this.digitMonitor);
+      
+      // decideFromMonitor now returns a string "DIGITOVER" or null
+      if (result && !this.user.inTrade && !this.pendingBuy && this.user.active && this.canTradeNow()) {
+        const stake = Number(this.user.manualStake) || 0.35;
+        const balance = Number(this.user.currentBalance || 0);
+
+        if (balance < stake) return;
+
+        const payload = {
+          buy: 1,
+          price: stake,
+          parameters: {
+            amount: stake,
+            basis: 'stake',
+            contract_type: result,
+            currency: 'USD',
+            duration: 1,
+            duration_unit: 's',
+            symbol: this.user.market
+          }
+        };
+
+        this.pendingBuy = true;
+        this.send(payload);
+        this.safeTelegram(`🎯 Digit Strat | ${this.user.userId} | ${result} | $${stake}`);
+      }
+    }
+  }
+
+  handleContractUpdate(contract) {
+    if (!contract?.is_sold) return;
+
+    const profit = Number(contract.profit);
+    const resultStatus = profit >= 0 ? 'win' : 'loss';
+
+    // IMPORTANT: Send result to strategy monitor for the 30s cooldown logic
+    this.digitMonitor.onResult(resultStatus);
+
+    this.user.inTrade = false;
+    this.currentContractId = null;
+
+    logTrade({
+      userId: this.user.userId,
+      market: this.user.market,
+      direction: resultStatus.toUpperCase(),
+      stake: contract.buy_price || 0,
+      profit,
+      balance: this.user.currentBalance
+    });
+  }
+
+  /* --- UTILITIES --- */
+  handleBalance(balance) {
+    if (!this.user.startBalance) this.user.startBalance = balance;
+    this.user.currentBalance = balance;
+    this.user.active = true;
+  }
+
+  send(data) {
+    if (this.user.ws?.readyState === WebSocket.OPEN) this.user.ws.send(JSON.stringify(data));
+  }
+
+  subscribeBalance() { this.send({ balance: 1, subscribe: 1 }); }
+  subscribeCandles() { this.send({ ticks: this.user.market, subscribe: 1 }); }
+  subscribeContract() { this.send({ proposal_open_contract: 1, contract_id: this.currentContractId, subscribe: 1 }); }
+
+  startTradeLoop() { setInterval(() => this.tryTrade(), 1000); }
+  startAccumulatorLoop() { setInterval(() => this.accBot.placeTrade(), 5 * 60 * 1000); }
+
+  canTradeNow() {
+    const now = Date.now();
+    this.tradeTimestamps = this.tradeTimestamps.filter(ts => now - ts < 60000);
+    if (this.tradeTimestamps.length >= this.MAX_TRADES_PER_MIN) return false;
+    this.tradeTimestamps.push(now);
+    return true;
+  }
+
+  _clearPendingBuy() { this.pendingBuy = false; }
+}
