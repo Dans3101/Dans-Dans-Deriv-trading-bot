@@ -85,29 +85,52 @@ export class DerivBot {
     this.pendingBuy = false;
     this.WS_PING_INTERVAL_MS = 15000;
     if (!this.user.market) this.user.market = 'R_100';
+
+    // FIX: Auto-register the bot so it appears in the Staff Portal Map
+    bots.set(this.user.userId, this);
+    console.log(`📡 [System] Bot instance created for ${this.user.userId} and added to registry.`);
   }
 
   connect() {
     const appId = process.env.DERIV_APP_ID || 1089;
+    console.log(`🔗 [${this.user.userId}] Attempting to connect to Deriv...`);
+    
     this.user.ws = new WebSocket(DERIV_WS(appId));
+    
     this.user.ws.on('open', () => {
+      console.log(`✅ [${this.user.userId}] WebSocket Connection Open.`);
       this.send({ authorize: this.user.apiToken });
+      
       setInterval(() => this.tryTrade(), 1000);
       setInterval(() => this.accBot.placeTrade(), 5 * 60 * 1000);
+      
       this.wsPingInterval = setInterval(() => {
         if (this.user.ws?.readyState === WebSocket.OPEN) this.user.ws.ping();
       }, this.WS_PING_INTERVAL_MS);
     });
+
     this.user.ws.on('message', msg => this.handleMessage(JSON.parse(msg)));
+    
     this.user.ws.on('close', () => {
+      console.warn(`⚠️ [${this.user.userId}] Connection closed. Reconnecting in 5s...`);
       this.user.active = false;
       setTimeout(() => this.connect(), 5000);
+    });
+
+    this.user.ws.on('error', (err) => {
+      console.error(`❌ [${this.user.userId}] WebSocket Error:`, err.message);
     });
   }
 
   handleMessage(data) {
+    if (data.error) {
+        console.error(`❌ [${this.user.userId}] API Error:`, data.error.message);
+        return;
+    }
+
     switch (data.msg_type) {
       case 'authorize':
+        console.log(`👤 [${this.user.userId}] Authorized successfully.`);
         this.send({ balance: 1, subscribe: 1 });
         this.send({ ticks: this.user.market, subscribe: 1 });
         break;
@@ -122,6 +145,7 @@ export class DerivBot {
       case 'buy':
         this.pendingBuy = false;
         if (data.buy?.contract_id) {
+          console.log(`💰 [${this.user.userId}] Trade Placed: ${data.buy.contract_id}`);
           this.user.inTrade = true;
           this.user.tradesToday++;
           this.send({ proposal_open_contract: 1, contract_id: data.buy.contract_id, subscribe: 1 });
@@ -138,12 +162,15 @@ export class DerivBot {
   handleTick(tick) {
     if (!tick?.quote) return;
     this.digitMonitor.add(tick.quote);
+    
     if (String(this.user.market).includes('100')) {
       const result = decideFromMonitor(this.digitMonitor);
       if (result && !this.user.inTrade && !this.pendingBuy && this.user.active && this.canTradeNow()) {
         const stake = Number(this.user.manualStake) || 0.35;
         if (this.user.currentBalance < stake) return;
+        
         this.pendingBuy = true;
+        console.log(`🎯 [${this.user.userId}] Strategy Signal: ${result} at $${stake}`);
         this.send({
           buy: 1, price: stake,
           parameters: {
@@ -158,15 +185,20 @@ export class DerivBot {
   handleContractUpdate(contract) {
     if (!contract?.is_sold) return;
     this.user.inTrade = false;
-    this.digitMonitor.onResult(contract.profit >= 0 ? 'win' : 'loss');
+    const profit = Number(contract.profit);
+    console.log(`📈 [${this.user.userId}] Contract Closed. Profit: $${profit}`);
+    
+    this.digitMonitor.onResult(profit >= 0 ? 'win' : 'loss');
+    
     logTrade({
       userId: this.user.userId, market: this.user.market,
       direction: 'DIGIT', stake: contract.buy_price || 0,
-      profit: Number(contract.profit), balance: this.user.currentBalance
+      profit: profit, balance: this.user.currentBalance
     });
   }
 
   send(data) { if (this.user.ws?.readyState === WebSocket.OPEN) this.user.ws.send(JSON.stringify(data)); }
+  
   canTradeNow() {
     const now = Date.now();
     this.tradeTimestamps = this.tradeTimestamps.filter(ts => now - ts < 60000);
