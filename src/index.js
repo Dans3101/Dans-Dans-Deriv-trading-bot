@@ -88,7 +88,7 @@ app.post('/connect', async (req, res) => {
   await bootBot({
     userId,
     apiToken,
-    market: 'R_100',
+    market: 'R_10',
     active: true,
     minStake: 0.35
   });
