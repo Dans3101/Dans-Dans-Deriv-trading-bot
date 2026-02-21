@@ -1,6 +1,6 @@
 // src/bot/digitStrategy.js
 
-export function createDigitMonitor({
+export function createDigitStrategy({
   windowSize = 100
 } = {}) {
 
@@ -8,15 +8,16 @@ export function createDigitMonitor({
   let consecutiveLosses = 0;
   let pauseUntil = 0;
 
-  function add(quote) {
-    if (quote == null) return null;
+  function addTick(quote) {
+    if (!quote) return null;
 
     const q = Number(quote);
     if (Number.isNaN(q)) return null;
 
-    const digit = Math.abs(Math.floor(q)) % 10;
-
+    // Get the last digit of the price
+    const digit = Math.floor((q * 100) % 10); 
     digits.push(digit);
+
     if (digits.length > windowSize) {
       digits.shift();
     }
@@ -30,76 +31,68 @@ export function createDigitMonitor({
     return c;
   }
 
-  function size() {
-    return digits.length;
-  }
-
   function isPaused() {
     return Date.now() < pauseUntil;
   }
 
   function onResult(result) {
     if (result === 'win') {
+      // Reset counter on any win
       consecutiveLosses = 0;
       return;
     }
 
     if (result === 'loss') {
       consecutiveLosses++;
+      console.log(`Current consecutive losses: ${consecutiveLosses}`);
 
-      if (consecutiveLosses === 1) {
-        pauseUntil = Date.now() + 30000; // 30 sec
-        console.log('⚠️ 1 LOSS → Pause 30s');
-      }
-
+      // When it loses exactly twice
       if (consecutiveLosses >= 2) {
-        pauseUntil = Date.now() + 60000; // 60 sec
-        consecutiveLosses = 0;
-        console.log('🛑 2 LOSSES → Pause 60s');
+        pauseUntil = Date.now() + 30000; // 30 seconds pause
+        consecutiveLosses = 0; // Reset counter so it can try again after the pause
+        console.log('🛑 Two losses reached. Pausing for 30 seconds...');
       }
     }
   }
 
-  return {
-    add,
-    counts,
-    size,
-    isPaused,
-    onResult,
-    digits
-  };
-}
+  function decide() {
+    // 1. Check if we are currently in the 30-second cooldown
+    if (isPaused()) return null;
 
-export function decideFromMonitor(monitor) {
+    // 2. Ensure we have enough data to make a statistical decision
+    if (digits.length < 50) return null;
 
-  if (!monitor) return null;
-  if (monitor.isPaused()) return null;
-  if (monitor.size() < 50) return null;
+    const c = counts();
+    const total = digits.length;
+    const percentages = c.map(v => (v / total) * 100);
 
-  const c = monitor.counts();
-  const total = monitor.size();
+    // Looking for the "Digit Over" opportunity
+    const highDigits = [6, 7, 8, 9];
+    let weakestDigit = 6;
+    let lowestPercent = 100;
 
-  const percentages = c.map(v => (v / total) * 100);
-
-  // Only high digits for dynamic barrier
-  const highDigits = [6, 7, 8, 9];
-
-  let weakestDigit = 6;
-  let lowestPercent = 100;
-
-  for (const d of highDigits) {
-    if (percentages[d] < lowestPercent) {
-      lowestPercent = percentages[d];
-      weakestDigit = d;
+    for (const d of highDigits) {
+      if (percentages[d] < lowestPercent) {
+        lowestPercent = percentages[d];
+        weakestDigit = d;
+      }
     }
+
+    // Setting the barrier (Prediction)
+    // If weakestDigit is 6, barrier is 5 (Digit Over 5)
+    const barrier = weakestDigit - 1;
+
+    if (barrier < 0 || barrier > 8) return null;
+
+    return {
+      contract_type: "DIGITOVER",
+      barrier: barrier // This acts as the 'Prediction' in the API
+    };
   }
 
-  const barrier = weakestDigit - 1;
-
-  if (barrier < 0 || barrier > 8) return null;
-
   return {
-    contract_type: "DIGITOVER",
-    barrier
+    addTick,
+    decide,
+    onResult
   };
 }
