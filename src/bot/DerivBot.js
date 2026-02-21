@@ -1,7 +1,5 @@
 import WebSocket from 'ws';
 import { DERIV_WS, SETTINGS } from '../config/deriv.js';
-// checkLimits and riskManager imports kept for session safety, 
-// but calculateStake logic is bypassed for manual entry.
 import { checkLimits } from './riskManager.js';
 import { decideTradeDirection } from './strategy.js';
 import { createDigitMonitor, decideFromMonitor } from './digitStrategy.js';
@@ -17,8 +15,6 @@ class AccumulatorBot {
     this.currentContractId = null;
     this.lastTelegramSent = 0;
     this.telegramInterval = 2000;
-    this.lastProfit = null;
-    this.cooldown = false;
   }
 
   safeTelegram(message) {
@@ -37,20 +33,16 @@ class AccumulatorBot {
     if (!this.user.active || this.inTrade || !canTrade(this.user)) return;
     if (this.bot && (this.bot.pendingBuy || this.user.inTrade)) return;
 
-    const limits = checkLimits(this.user);
-    if (limits !== 'OK') return;
-
-    // Use User-defined manual stake for Accumulator
-    let stake = Number(this.user.manualStake) || 0.35;
-
+    // Use Manual Stake from User Session
+    const stake = Number(this.user.manualStake) || 0.35;
     const balance = Number(this.user.currentBalance || 0);
+
     if (balance < stake) {
-      console.warn(`[${this.user.userId}] ACC skipped: Insufficient balance ($${balance}) for stake $${stake}`);
+      console.warn(`[${this.user.userId}] ACC skipped: Low balance for manual stake $${stake}`);
       return;
     }
 
     this.inTrade = true;
-
     const payload = {
       buy: 1,
       price: stake,
@@ -77,14 +69,14 @@ class AccumulatorBot {
     if (!contract?.is_sold) return;
     this.inTrade = false;
     this.currentContractId = null;
-    this.lastProfit = Number(contract.profit);
-    const result = this.lastProfit >= 0 ? 'WIN' : 'LOSS';
+    const profit = Number(contract.profit);
+    
     logTrade({
       userId: this.user.userId,
       market: this.user.market,
       direction: 'ACCUMULATOR',
       stake: contract.buy_price || 0,
-      profit: this.lastProfit,
+      profit,
       balance: this.user.currentBalance
     });
   }
@@ -95,7 +87,6 @@ export class DerivBot {
     this.user = user;
     this.candles = [];
     this.currentContractId = null;
-    this.reconnectTimeout = null;
     this.user.active = false;
     this.user.inTrade = false;
     this.user.startBalance = 0;
@@ -104,12 +95,12 @@ export class DerivBot {
     this.tickBuffer = [];
     this.tradeTimestamps = [];
     this.MAX_TRADES_PER_MIN = this.user.maxTradesPerMin || 10;
+    
     this.accBot = new AccumulatorBot(this.user, this);
     this.digitMonitor = createDigitMonitor({ windowSize: 60 });
+    
     this.pendingBuy = false;
-    this.pendingBuyTimeout = null;
     this.PENDING_BUY_TIMEOUT_MS = 5000;
-    this.wsPingInterval = null;
     this.WS_PING_INTERVAL_MS = 15000;
 
     if (!this.user.market) this.user.market = 'R_100';
@@ -130,8 +121,7 @@ export class DerivBot {
     this.user.ws.on('close', () => {
       this.user.active = false;
       this._clearPendingBuy();
-      this._clearPingInterval();
-      this.scheduleReconnect();
+      setTimeout(() => this.connect(), 5000);
     });
   }
 
@@ -173,21 +163,18 @@ export class DerivBot {
   handleTick(tick) {
     if (!tick?.quote) return;
     const digit = this.digitMonitor.add(tick.quote);
-    this.tickBuffer.push(tick);
 
-    const isR100 = String(this.user.market || '').toUpperCase().includes('100');
+    const isR100 = String(this.user.market).includes('100');
     if (isR100) {
-      const direction = decideFromMonitor(this.digitMonitor, { mode: this.user.strategyMode || 'OVER' });
+      // Use the hardened strategy logic
+      const result = decideFromMonitor(this.digitMonitor);
       
-      if (direction && !this.user.inTrade && !this.pendingBuy && this.user.active && this.canTradeNow()) {
-        const balance = Number(this.user.currentBalance || 0);
-        // GET USER MANUAL STAKE
+      // decideFromMonitor now returns a string "DIGITOVER" or null
+      if (result && !this.user.inTrade && !this.pendingBuy && this.user.active && this.canTradeNow()) {
         const stake = Number(this.user.manualStake) || 0.35;
+        const balance = Number(this.user.currentBalance || 0);
 
-        if (balance < stake) {
-          console.warn(`[${this.user.userId}] Digit trade skipped: Balance too low for manual stake $${stake}`);
-          return;
-        }
+        if (balance < stake) return;
 
         const payload = {
           buy: 1,
@@ -195,7 +182,7 @@ export class DerivBot {
           parameters: {
             amount: stake,
             basis: 'stake',
-            contract_type: direction,
+            contract_type: result,
             currency: 'USD',
             duration: 1,
             duration_unit: 's',
@@ -205,40 +192,31 @@ export class DerivBot {
 
         this.pendingBuy = true;
         this.send(payload);
-        this.safeTelegram(`🎯 Digit Strat | ${this.user.userId} | ${direction} | $${stake}`);
+        this.safeTelegram(`🎯 Digit Strat | ${this.user.userId} | ${result} | $${stake}`);
       }
     }
   }
 
-  tryTrade(force = false) {
-    if (String(this.user.market).includes('100')) return;
-    if (!this.user.active || this.user.inTrade || this.pendingBuy) return;
+  handleContractUpdate(contract) {
+    if (!contract?.is_sold) return;
 
-    let direction = decideTradeDirection(this.candles);
-    if (direction) {
-      const balance = Number(this.user.currentBalance || 0);
-      // GET USER MANUAL STAKE
-      const stake = Number(this.user.manualStake) || 0.35;
+    const profit = Number(contract.profit);
+    const resultStatus = profit >= 0 ? 'win' : 'loss';
 
-      if (balance < stake) return;
+    // IMPORTANT: Send result to strategy monitor for the 30s cooldown logic
+    this.digitMonitor.onResult(resultStatus);
 
-      const payload = {
-        buy: 1,
-        price: stake,
-        parameters: {
-          amount: stake,
-          basis: 'stake',
-          contract_type: direction,
-          currency: 'USD',
-          duration: 1,
-          duration_unit: 'm',
-          symbol: this.user.market
-        }
-      };
+    this.user.inTrade = false;
+    this.currentContractId = null;
 
-      this.pendingBuy = true;
-      this.send(payload);
-    }
+    logTrade({
+      userId: this.user.userId,
+      market: this.user.market,
+      direction: resultStatus.toUpperCase(),
+      stake: contract.buy_price || 0,
+      profit,
+      balance: this.user.currentBalance
+    });
   }
 
   /* --- UTILITIES --- */
@@ -253,19 +231,11 @@ export class DerivBot {
   }
 
   subscribeBalance() { this.send({ balance: 1, subscribe: 1 }); }
-  subscribeCandles() {
-    this.send({ ticks: this.user.market, subscribe: 1 });
-  }
-  subscribeContract() {
-    this.send({ proposal_open_contract: 1, contract_id: this.currentContractId, subscribe: 1 });
-  }
+  subscribeCandles() { this.send({ ticks: this.user.market, subscribe: 1 }); }
+  subscribeContract() { this.send({ proposal_open_contract: 1, contract_id: this.currentContractId, subscribe: 1 }); }
 
-  startTradeLoop() {
-    setInterval(() => this.tryTrade(), 1000);
-  }
-  startAccumulatorLoop() {
-    setInterval(() => this.accBot.placeTrade(), 5 * 60 * 1000);
-  }
+  startTradeLoop() { setInterval(() => this.tryTrade(), 1000); }
+  startAccumulatorLoop() { setInterval(() => this.accBot.placeTrade(), 5 * 60 * 1000); }
 
   canTradeNow() {
     const now = Date.now();
@@ -275,24 +245,5 @@ export class DerivBot {
     return true;
   }
 
-  _clearPendingBuy() {
-    this.pendingBuy = false;
-    if (this.pendingBuyTimeout) clearTimeout(this.pendingBuyTimeout);
-  }
-
-  _clearPingInterval() { if (this.wsPingInterval) clearInterval(this.wsPingInterval); }
-
-  handleContractUpdate(contract) {
-    if (!contract?.is_sold) return;
-    this.user.inTrade = false;
-    this.currentContractId = null;
-    logTrade({
-      userId: this.user.userId,
-      market: this.user.market,
-      direction: contract.profit >= 0 ? 'WIN' : 'LOSS',
-      stake: contract.buy_price || 0,
-      profit: contract.profit,
-      balance: this.user.currentBalance
-    });
-  }
+  _clearPendingBuy() { this.pendingBuy = false; }
 }
