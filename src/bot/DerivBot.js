@@ -1,7 +1,7 @@
 // src/bot/DerivBot.js
 import WebSocket from 'ws';
 import { DERIV_WS } from '../config/deriv.js';
-import { checkLimits, updateStats } from './riskManager.js'; // Added updateStats import
+import { checkLimits, updateStats, calculateStake } from './riskManager.js'; // Added calculateStake
 import { createDigitMonitor, decideFromMonitor } from './digitStrategy.js';
 import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
@@ -28,22 +28,21 @@ class AccumulatorBot {
   }
 
   placeTrade(prediction, stake) {
-    // 1. Check all limits before trying to buy
     if (!this.user.active || this.inTrade || !canTrade(this.user)) return;
 
     const limits = checkLimits(this.user);
-    if (limits !== 'OK') {
-      // If limits are hit, we stop trying to trade
-      return;
-    }
+    if (limits !== 'OK') return;
 
-    this.inTrade = true; // Lock the bot to prevent double-entry
+    // Use the calculated stake, or fallback to 0.35 if something goes wrong
+    const finalStake = stake || 0.35;
+
+    this.inTrade = true;
 
     const payload = {
       buy: 1,
-      price: stake,
+      price: finalStake,
       parameters: {
-        amount: stake,
+        amount: finalStake,
         basis: 'stake',
         contract_type: 'DIGITDIFF',
         currency: 'USD',
@@ -54,7 +53,7 @@ class AccumulatorBot {
       }
     };
 
-    console.log(`[${this.user.userId}] 🛒 Buying Digit Differs on: ${prediction}`);
+    console.log(`[${this.user.userId}] 🛒 Stake: $${finalStake} | Prediction: ${prediction}`);
     if (this.user.ws?.readyState === WebSocket.OPEN) {
       this.user.ws.send(JSON.stringify(payload));
     } else {
@@ -68,13 +67,11 @@ class AccumulatorBot {
     const profit = Number(contract.profit);
     const result = profit >= 0 ? 'WIN' : 'LOSS';
     
-    // 2. CRITICAL: Update the riskManager stats (Fixes tradesToday=0 issue)
     updateStats(this.user, profit);
     
-    console.log(`[${this.user.userId}] 💰 Trade Finished: ${result} ($${profit})`);
-    this.safeTelegram(`🔔 ${result} | Profit: $${profit} | Today: ${this.user.tradesToday} | Bal: ${this.user.currentBalance}`);
+    console.log(`[${this.user.userId}] 💰 Result: ${result} ($${profit})`);
+    this.safeTelegram(`🔔 ${result} | P: $${profit} | Today: ${this.user.tradesToday} | Bal: ${this.user.currentBalance}`);
 
-    // 3. Log to file
     logTrade({
       userId: this.user.userId,
       market: this.user.market,
@@ -84,7 +81,6 @@ class AccumulatorBot {
       balance: this.user.currentBalance
     });
 
-    // 4. UNLOCK the bot for the next trade
     this.inTrade = false;
   }
 }
@@ -94,49 +90,38 @@ export class DerivBot {
     this.user = user;
     this.user.active = false;
     this.user.currentBalance = 0;
-    // Initialize stats on the user object if they don't exist
     this.user.tradesToday = 0;
     this.user.totalProfit = 0;
+    
+    // DEFAULT CONFIG (User can change these via your database/frontend)
+    if (!this.user.stakePercent) this.user.stakePercent = 0.01; // Default 1% of balance
+    if (!this.user.baseStake) this.user.baseStake = null;      // Set this to a number to override percent
     
     this.accBot = new AccumulatorBot(this.user, this);
     this.digitMonitor = createDigitMonitor({ windowSize: 50 });
     if (!this.user.market) this.user.market = 'R_100';
   }
 
+  // ... (connect, authorize, and message handlers remain the same) ...
   connect() {
     const appId = process.env.DERIV_APP_ID || 1089;
     this.user.ws = new WebSocket(DERIV_WS(appId));
-
-    this.user.ws.on('open', () => {
-      console.log(`[${this.user.userId}] Connected to Deriv`);
-      this.authorize();
-    });
-
+    this.user.ws.on('open', () => { console.log(`[${this.user.userId}] Connected`); this.authorize(); });
     this.user.ws.on('message', msg => {
       try {
         const data = JSON.parse(msg);
         if (data.error) {
           console.error(`[${this.user.userId}] API Error:`, data.error.message);
-          // If a buy failed, unlock the bot
           if (data.msg_type === 'buy') this.accBot.inTrade = false;
           return;
         }
         this.handleMessage(data);
-      } catch (e) {
-        console.error("JSON Error:", e.message);
-      }
+      } catch (e) { console.error("JSON Error:", e.message); }
     });
-
-    this.user.ws.on('close', () => {
-      this.user.active = false;
-      console.log(`[${this.user.userId}] Connection closed. Reconnecting...`);
-      setTimeout(() => this.connect(), 5000);
-    });
+    this.user.ws.on('close', () => { this.user.active = false; setTimeout(() => this.connect(), 5000); });
   }
 
-  authorize() {
-    this.user.ws.send(JSON.stringify({ authorize: this.user.apiToken }));
-  }
+  authorize() { this.user.ws.send(JSON.stringify({ authorize: this.user.apiToken })); }
 
   handleMessage(data) {
     switch (data.msg_type) {
@@ -144,36 +129,22 @@ export class DerivBot {
         this.user.ws.send(JSON.stringify({ balance: 1, subscribe: 1 }));
         this.user.ws.send(JSON.stringify({ ticks: this.user.market, subscribe: 1 }));
         break;
-
       case 'balance':
         this.user.currentBalance = data.balance.balance;
         this.user.active = true;
         break;
-
       case 'tick':
         this.handleTick(data.tick);
         break;
-
       case 'buy':
-        // Monitor the trade result
-        this.user.ws.send(JSON.stringify({
-          proposal_open_contract: 1,
-          contract_id: data.buy.contract_id,
-          subscribe: 1
-        }));
+        this.user.ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: data.buy.contract_id, subscribe: 1 }));
         break;
-
       case 'proposal_open_contract':
         const contract = data.proposal_open_contract;
         if (contract.is_sold) {
-          // Tell the digit monitor to handle pause logic
           this.digitMonitor.onResult(contract.profit >= 0 ? 'win' : 'loss');
-          // Handle cleanup and unlock
           this.accBot.handleContractUpdate(contract);
-          // Unsubscribe from this contract
-          if (data.subscription) {
-            this.user.ws.send(JSON.stringify({ forget: data.subscription.id }));
-          }
+          if (data.subscription) this.user.ws.send(JSON.stringify({ forget: data.subscription.id }));
         }
         break;
     }
@@ -183,9 +154,11 @@ export class DerivBot {
     if (!tick?.quote) return;
     this.digitMonitor.add(tick.quote);
     const prediction = decideFromMonitor(this.digitMonitor);
+    
     if (prediction !== null) {
-      // Pass the prediction to the trade function
-      this.accBot.placeTrade(prediction, 0.35); 
+      // 🚀 CALCULATE DYNAMIC STAKE HERE
+      const dynamicStake = calculateStake(this.user);
+      this.accBot.placeTrade(prediction, dynamicStake); 
     }
   }
 }
