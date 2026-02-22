@@ -243,7 +243,7 @@ scheduleReconnect() {
 if (this.reconnectTimeout) return;
 this.reconnectTimeout = setTimeout(() => {
 this.reconnectTimeout = null;
-console.log([${this.user.userId}] 🔁 Reconnecting...);
+console.log(`[${this.user.userId}] 🔁 Reconnecting...`);
 this.connect();
 }, 5000);
 }
