@@ -4,7 +4,6 @@ import WebSocket from 'ws';
 import { DERIV_WS, SETTINGS } from '../config/deriv.js';
 import { calculateStake, checkLimits } from './riskManager.js';
 import { decideTradeDirection } from './strategy.js';
-import { createDigitStrategy } from './digitStrategy.js';
 import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
 import { logTrade } from '../utils/tradeLogger.js';
@@ -26,9 +25,14 @@ class AccumulatorBot {
     const now = Date.now();
     if (now - this.lastTelegramSent < this.telegramInterval) return;
     this.lastTelegramSent = now;
+
     try {
       const p = sendTelegramMessage(message);
-      if (p?.catch) p.catch(err => console.warn('Telegram send failed (acc):', err?.message || err));
+      if (p?.catch) {
+        p.catch(err =>
+          console.warn('Telegram send failed (acc):', err?.message || err)
+        );
+      }
     } catch (err) {
       console.warn('Telegram send failed (acc):', err?.message || err);
     }
@@ -48,13 +52,17 @@ class AccumulatorBot {
     const MAX_STAKE = Number(this.user.maxStake) || 1.0;
 
     if (!stake || Number.isNaN(Number(stake))) stake = MIN_STAKE;
+
     stake = Math.round(Number(stake) * 100) / 100;
+
     if (stake < MIN_STAKE) stake = MIN_STAKE;
     if (stake > MAX_STAKE) stake = MAX_STAKE;
 
     const balance = Number(this.user.currentBalance || 0);
     if (balance < stake) {
-      console.warn(`[${this.user.userId}] ACC skipped: insufficient balance (${balance})`);
+      console.warn(
+        `[${this.user.userId}] ACC skipped: insufficient balance (${balance})`
+      );
       return;
     }
 
@@ -74,8 +82,14 @@ class AccumulatorBot {
       }
     };
 
-    console.log(`[${this.user.userId}] SEND BUY (acc)`, JSON.stringify(payload));
-    this.safeTelegram(`🚀 ${this.user.userId} | ACC | $${stake}`);
+    console.log(
+      `[${this.user.userId}] SEND BUY (acc)`,
+      JSON.stringify(payload)
+    );
+
+    this.safeTelegram(
+      `🚀 ${this.user.userId} | ACC | $${stake}`
+    );
 
     if (this.user.ws?.readyState === WebSocket.OPEN) {
       this.user.ws.send(JSON.stringify(payload));
@@ -91,12 +105,15 @@ class AccumulatorBot {
     const profit = Number(contract.profit);
     this.inTrade = false;
     this.currentContractId = null;
-
     this.lastProfit = profit;
 
     const result = profit >= 0 ? 'WIN' : 'LOSS';
+
     console.log(`[ACC RESULT] ${result} | Profit: ${profit}`);
-    this.safeTelegram(`[ACC RESULT] ${this.user.userId} | ${result} | ${profit}`);
+
+    this.safeTelegram(
+      `[ACC RESULT] ${this.user.userId} | ${result} | ${profit}`
+    );
 
     logTrade({
       userId: this.user.userId,
@@ -128,7 +145,9 @@ export class DerivBot {
 
     if (!this.user.market) {
       this.user.market = 'R_100';
-      console.log(`[${this.user.userId}] Default market set: ${this.user.market}`);
+      console.log(
+        `[${this.user.userId}] Default market set: ${this.user.market}`
+      );
     }
   }
 
@@ -145,7 +164,10 @@ export class DerivBot {
       try {
         this.handleMessage(JSON.parse(msg));
       } catch (e) {
-        console.error(`[${this.user.userId}] JSON parse error`, e?.message);
+        console.error(
+          `[${this.user.userId}] JSON parse error`,
+          e?.message
+        );
       }
     });
 
@@ -156,12 +178,16 @@ export class DerivBot {
     });
 
     this.user.ws.on('error', err => {
-      console.error(`[${this.user.userId}] WS error`, err?.message);
+      console.error(
+        `[${this.user.userId}] WS error`,
+        err?.message
+      );
     });
   }
 
   scheduleReconnect() {
     if (this.reconnectTimeout) return;
+
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null;
       console.log(`[${this.user.userId}] Reconnecting...`);
@@ -198,12 +224,16 @@ export class DerivBot {
         break;
 
       default:
-        console.log(`[${this.user.userId}] RAW:`, JSON.stringify(data));
+        console.log(
+          `[${this.user.userId}] RAW:`,
+          JSON.stringify(data)
+        );
     }
   }
 
   handleBalance(balance) {
     if (balance == null) return;
+
     console.log(`[${this.user.userId}] Balance: ${balance}`);
     this.user.currentBalance = balance;
     this.user.active = true;
