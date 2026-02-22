@@ -15,7 +15,7 @@ class AccumulatorBot {
     this.inTrade = false;
     this.lastTelegramSent = 0;
     this.telegramInterval = 2000;
-    this.baseStake = 5;
+    this.baseStake = 0.5; // Adjusted to match your test stake
     this.lastProfit = null;
   }
 
@@ -31,48 +31,51 @@ class AccumulatorBot {
     }
   }
 
-  placeTrade(direction, stake) {
+  placeTrade(prediction, stake) {
+    // 1. Validation Guards
     if (!this.user.active || this.inTrade || !canTrade(this.user)) return;
 
     const limits = checkLimits(this.user);
     if (limits !== 'OK') return;
 
+    // 2. Stake Management
     stake = stake || this.baseStake;
-    const MIN_STAKE = Number(this.user.minStake) || 0.31;
-    const MAX_STAKE = Number(this.user.maxStake) || 1.0;
+    const MIN_STAKE = Number(this.user.minStake) || 0.35;
+    const MAX_STAKE = Number(this.user.maxStake) || 5.0;
 
     if (stake < MIN_STAKE) stake = MIN_STAKE;
     if (stake > MAX_STAKE) stake = MAX_STAKE;
 
     if ((Number(this.user.currentBalance) || 0) < stake) {
-      console.warn(`[${this.user.userId}] ACC skipped: insufficient balance`);
+      console.warn(`[${this.user.userId}] Insufficient balance: ${this.user.currentBalance}`);
       return;
     }
 
     this.inTrade = true;
 
+    // 3. Construct Payload for Digits
+    // Note: 'barrier' is used for the digit prediction in DIGITDIFF/DIGITMATCH
     const payload = {
       buy: 1,
       price: stake,
       parameters: {
         amount: stake,
         basis: 'stake',
-        contract_type: 'CALLPUT',
+        contract_type: 'DIGITDIFF', 
         currency: 'USD',
         duration: 1,
-        duration_unit: 'm',
-        symbol: this.user.market,
-        prediction: direction
+        duration_unit: 't', // 't' for Ticks is required for digits
+        symbol: this.user.market || 'R_100',
+        barrier: String(prediction) 
       }
     };
 
-    console.log(`[${this.user.userId}] SEND BUY`, JSON.stringify(payload));
-    this.safeTelegram(`🚀 ${this.user.userId} | ${direction} | $${stake}`);
-
+    console.log(`[${this.user.userId}] ATTEMPTING TRADE: Predict ${prediction} | Stake ${stake}`);
+    
     if (this.user.ws?.readyState === WebSocket.OPEN) {
       this.user.ws.send(JSON.stringify(payload));
     } else {
-      console.warn(`[${this.user.userId}] WS not open`);
+      console.warn(`[${this.user.userId}] WS closed, cannot trade`);
       this.inTrade = false;
     }
   }
@@ -84,13 +87,13 @@ class AccumulatorBot {
     this.lastProfit = profit;
 
     const result = profit >= 0 ? 'WIN' : 'LOSS';
-    console.log(`[ACC RESULT] ${result} | Profit: ${profit}`);
-    this.safeTelegram(`[ACC RESULT] ${this.user.userId} | ${result} | ${profit}`);
+    console.log(`[TRADE RESULT] ${result} | Profit: ${profit}`);
+    this.safeTelegram(`🔔 ${this.user.userId} | ${result} | Profit: $${profit}`);
 
     logTrade({
       userId: this.user.userId,
       market: this.user.market,
-      direction: 'ACCUMULATOR',
+      direction: 'DIGITDIFF',
       stake: contract.buy_price || 0,
       profit,
       balance: this.user.currentBalance
@@ -102,16 +105,13 @@ export class DerivBot {
   constructor(user) {
     this.user = user;
     this.reconnectTimeout = null;
-    this.currentContractId = null;
     this.user.active = false;
-    this.user.inTrade = false;
     this.user.currentBalance = 0;
 
     this.accBot = new AccumulatorBot(this.user, this);
 
     if (!this.user.market) this.user.market = 'R_100';
-    console.log(`[${this.user.userId}] Market set: ${this.user.market}`);
-
+    
     // Digit monitor for strategy
     this.digitMonitor = createDigitMonitor({ windowSize: 100 });
   }
@@ -121,7 +121,7 @@ export class DerivBot {
     this.user.ws = new WebSocket(DERIV_WS(appId));
 
     this.user.ws.on('open', () => {
-      console.log(`[${this.user.userId}] Connected`);
+      console.log(`[${this.user.userId}] Connected to Deriv`);
       this.authorize();
     });
 
@@ -134,13 +134,13 @@ export class DerivBot {
     });
 
     this.user.ws.on('close', () => {
-      console.log(`[${this.user.userId}] Disconnected`);
+      console.log(`[${this.user.userId}] Connection Closed`);
       this.user.active = false;
       this.scheduleReconnect();
     });
 
     this.user.ws.on('error', err => {
-      console.error(`[${this.user.userId}] WS error`, err?.message);
+      console.error(`[${this.user.userId}] WS Error`, err?.message);
     });
   }
 
@@ -148,7 +148,6 @@ export class DerivBot {
     if (this.reconnectTimeout) return;
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null;
-      console.log(`[${this.user.userId}] Reconnecting...`);
       this.connect();
     }, 5000);
   }
@@ -160,14 +159,20 @@ export class DerivBot {
   }
 
   authorize() {
-    console.log(`[${this.user.userId}] Authorizing...`);
     this.send({ authorize: this.user.apiToken });
   }
 
   handleMessage(data) {
+    // Handle API Errors first
+    if (data.error) {
+      console.error(`[${this.user.userId}] API ERROR:`, data.error.message);
+      if (data.msg_type === 'buy') this.accBot.inTrade = false;
+      return;
+    }
+
     switch (data.msg_type) {
       case 'authorize':
-        console.log(`[${this.user.userId}] Authorized`);
+        console.log(`[${this.user.userId}] Authorized Successfully`);
         this.subscribeBalance();
         this.subscribeTicks();
         break;
@@ -181,11 +186,17 @@ export class DerivBot {
         break;
 
       case 'buy':
-        console.log(`[${this.user.userId}] Buy accepted`);
+        console.log(`[${this.user.userId}] Buy Success: ${data.buy.contract_id}`);
+        // Telegram notification of successful entry
+        this.accBot.safeTelegram(`🚀 Trade Placed: ${data.buy.contract_id}`);
+        break;
+
+      case 'proposal_open_contract':
+        this.accBot.handleContractUpdate(data.proposal_open_contract);
         break;
 
       default:
-        console.log(`[${this.user.userId}] RAW:`, JSON.stringify(data));
+        // Optional: console.log(`[${this.user.userId}] Other msg:`, data.msg_type);
     }
   }
 
@@ -193,7 +204,7 @@ export class DerivBot {
     if (balance == null) return;
     this.user.currentBalance = balance;
     this.user.active = true;
-    console.log(`[${this.user.userId}] Balance: ${balance}`);
+    console.log(`[${this.user.userId}] Balance Updated: ${balance}`);
   }
 
   subscribeBalance() {
@@ -201,21 +212,21 @@ export class DerivBot {
   }
 
   subscribeTicks() {
-    if (!this.user.market) return;
     this.send({ ticks: this.user.market, subscribe: 1 });
-    console.log(`[${this.user.userId}] Subscribed to ticks for ${this.user.market}`);
+    console.log(`[${this.user.userId}] Monitoring ${this.user.market}...`);
   }
 
   handleTick(tick) {
     if (!tick?.quote) return;
 
-    // Add the latest digit
+    // Add the latest digit via our monitor
     const digit = this.digitMonitor.add(tick.quote);
 
-    // Decide whether to trade
-    const decision = decideFromMonitor(this.digitMonitor);
-    if (decision) {
-      this.accBot.placeTrade(decision, 0.5); // 0.5 USD stake for testing
+    // Get strategy decision (will return a digit 0-9 or null)
+    const prediction = decideFromMonitor(this.digitMonitor);
+    
+    if (prediction !== null) {
+      this.accBot.placeTrade(prediction, this.user.minStake || 0.5);
     }
   }
 }
