@@ -4,7 +4,6 @@ import WebSocket from 'ws';
 import { DERIV_WS, SETTINGS } from '../config/deriv.js';
 import { calculateStake, checkLimits } from './riskManager.js';
 import { decideTradeDirection } from './strategy.js';
-import { createDigitMonitor, decideFromMonitor } from './digitStrategy.js';
 import { sendTelegramMessage } from '../notifications/telegram.js';
 import { canTrade } from '../middleware/paymentGuard.js';
 import { logTrade } from '../utils/tradeLogger.js';
@@ -26,9 +25,14 @@ class AccumulatorBot {
     const now = Date.now();
     if (now - this.lastTelegramSent < this.telegramInterval) return;
     this.lastTelegramSent = now;
+
     try {
       const p = sendTelegramMessage(message);
-      if (p?.catch) p.catch(err => console.warn('Telegram send failed (acc):', err?.message || err));
+      if (p?.catch) {
+        p.catch(err =>
+          console.warn('Telegram send failed (acc):', err?.message || err)
+        );
+      }
     } catch (err) {
       console.warn('Telegram send failed (acc):', err?.message || err);
     }
@@ -48,12 +52,19 @@ class AccumulatorBot {
     const MAX_STAKE = Number(this.user.maxStake) || 1.0;
 
     if (!stake || Number.isNaN(Number(stake))) stake = MIN_STAKE;
+
     stake = Math.round(Number(stake) * 100) / 100;
+
     if (stake < MIN_STAKE) stake = MIN_STAKE;
     if (stake > MAX_STAKE) stake = MAX_STAKE;
 
     const balance = Number(this.user.currentBalance || 0);
-    if (balance < stake) return;
+    if (balance < stake) {
+      console.warn(
+        `[${this.user.userId}] ACC skipped: insufficient balance (${balance})`
+      );
+      return;
+    }
 
     this.inTrade = true;
 
@@ -71,12 +82,19 @@ class AccumulatorBot {
       }
     };
 
-    console.log(`[${this.user.userId}] SEND BUY (acc)`, JSON.stringify(payload));
-    this.safeTelegram(`🚀 ${this.user.userId} | ACC | $${stake}`);
+    console.log(
+      `[${this.user.userId}] SEND BUY (acc)`,
+      JSON.stringify(payload)
+    );
+
+    this.safeTelegram(
+      `🚀 ${this.user.userId} | ACC | $${stake}`
+    );
 
     if (this.user.ws?.readyState === WebSocket.OPEN) {
       this.user.ws.send(JSON.stringify(payload));
     } else {
+      console.warn(`[${this.user.userId}] WS not open (acc)`);
       this.inTrade = false;
     }
   }
@@ -90,7 +108,12 @@ class AccumulatorBot {
     this.lastProfit = profit;
 
     const result = profit >= 0 ? 'WIN' : 'LOSS';
-    this.safeTelegram(`[ACC RESULT] ${this.user.userId} | ${result} | $${profit}`);
+
+    console.log(`[ACC RESULT] ${result} | Profit: ${profit}`);
+
+    this.safeTelegram(
+      `[ACC RESULT] ${this.user.userId} | ${result} | ${profit}`
+    );
 
     logTrade({
       userId: this.user.userId,
@@ -120,10 +143,11 @@ export class DerivBot {
 
     this.accBot = new AccumulatorBot(this.user, this);
 
-    this.digitMonitor = createDigitMonitor({ windowSize: 60 });
-
     if (!this.user.market) {
       this.user.market = 'R_100';
+      console.log(
+        `[${this.user.userId}] Default market set: ${this.user.market}`
+      );
     }
   }
 
@@ -134,14 +158,16 @@ export class DerivBot {
     this.user.ws.on('open', () => {
       console.log(`[${this.user.userId}] Connected`);
       this.authorize();
-      this.startDigitLoop();
     });
 
     this.user.ws.on('message', msg => {
       try {
         this.handleMessage(JSON.parse(msg));
       } catch (e) {
-        console.error(`[${this.user.userId}] JSON parse error`, e?.message);
+        console.error(
+          `[${this.user.userId}] JSON parse error`,
+          e?.message
+        );
       }
     });
 
@@ -152,12 +178,16 @@ export class DerivBot {
     });
 
     this.user.ws.on('error', err => {
-      console.error(`[${this.user.userId}] WS error`, err?.message);
+      console.error(
+        `[${this.user.userId}] WS error`,
+        err?.message
+      );
     });
   }
 
   scheduleReconnect() {
     if (this.reconnectTimeout) return;
+
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null;
       console.log(`[${this.user.userId}] Reconnecting...`);
@@ -168,80 +198,48 @@ export class DerivBot {
   send(data) {
     if (this.user.ws?.readyState === WebSocket.OPEN) {
       this.user.ws.send(JSON.stringify(data));
+    } else {
+      console.warn(`[${this.user.userId}] WS not open`);
     }
   }
 
   authorize() {
+    console.log(`[${this.user.userId}] Authorizing...`);
     this.send({ authorize: this.user.apiToken });
-    this.subscribeBalance();
   }
 
   handleMessage(data) {
     switch (data.msg_type) {
       case 'authorize':
         console.log(`[${this.user.userId}] Authorized`);
+        this.subscribeBalance();
         break;
 
       case 'balance':
         this.handleBalance(data.balance?.balance);
         break;
 
-      case 'tick':
-        this.handleTick(data.tick);
+      case 'buy':
+        console.log(`[${this.user.userId}] Buy accepted`);
         break;
 
       default:
-        break;
+        console.log(
+          `[${this.user.userId}] RAW:`,
+          JSON.stringify(data)
+        );
     }
   }
 
   handleBalance(balance) {
     if (balance == null) return;
+
+    console.log(`[${this.user.userId}] Balance: ${balance}`);
     this.user.currentBalance = balance;
     this.user.active = true;
   }
 
   subscribeBalance() {
     this.send({ balance: 1, subscribe: 1 });
-  }
-
-  handleTick(tick) {
-    if (!tick?.quote) return;
-    const direction = decideFromMonitor(this.digitMonitor);
-    this.digitMonitor.add(tick.quote);
-
-    if (!direction || this.user.inTrade || this.pendingBuy || !this.user.active || !canTrade(this.user)) return;
-
-    const stake = +(this.user.currentBalance * 0.02).toFixed(2); // 2% of balance
-    if (stake < 0.31) return;
-
-    const payload = {
-      buy: 1,
-      price: stake,
-      parameters: {
-        amount: stake,
-        basis: 'stake',
-        contract_type: direction,
-        currency: 'USD',
-        duration: 1,
-        duration_unit: 's',
-        symbol: this.user.market
-      }
-    };
-
-    this.pendingBuy = true;
-    this.pendingBuyTimeout = setTimeout(() => this.pendingBuy = false, this.PENDING_BUY_TIMEOUT_MS);
-
-    console.log(`[${this.user.userId}] SEND BUY (digit)`, JSON.stringify(payload));
-    sendTelegramMessage(`[DIGIT STRAT] ${this.user.userId} | ${direction} | $${stake}`);
-    this.send(payload);
-  }
-
-  startDigitLoop() {
-    // Ensure tick updates continuously
-    if (this.tradeLoop) return;
-    this.tradeLoop = setInterval(() => {
-      this.accBot.placeTrade();
-    }, 180000 + Math.random() * 120000);
   }
 }
