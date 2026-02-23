@@ -4,7 +4,7 @@ let consecutiveLosses = 0;
 let pauseUntil = 0;
 const digits = [];
 
-export function createDigitMonitor({ windowSize = 100 } = {}) {
+export function createDigitMonitor({ windowSize = 50 } = {}) {
   return {
     add: (quote) => {
       const strQuote = quote.toString().replace('.', '');
@@ -21,8 +21,10 @@ export function createDigitMonitor({ windowSize = 100 } = {}) {
         consecutiveLosses = 0;
       } else {
         consecutiveLosses++;
+        // If we hit 2 losses, the Martingale is getting high. 
+        // We pause 30s to let the market "cool down" as per your original file.
         if (consecutiveLosses >= 2) {
-          console.log("⚠️ Strategy: 2 losses. Pausing 30s.");
+          console.log("⚠️ Strategy: 2 losses. Martingale active. Pausing 30s for recovery.");
           pauseUntil = Date.now() + 30000;
           consecutiveLosses = 0;
         }
@@ -33,26 +35,24 @@ export function createDigitMonitor({ windowSize = 100 } = {}) {
 
 export function decideFromMonitor(monitor) {
   // Guard: Don't trade if paused or not enough data
-  if (Date.now() < pauseUntil || digits.length < 20) return null;
+  if (Date.now() < pauseUntil || digits.length < 15) return null;
 
-  const counts = Array(10).fill(0);
-  digits.forEach(d => counts[d]++);
+  // Analysis: Focus on the last 5 ticks
+  const lastFive = digits.slice(-5);
   
-  const total = digits.length;
-  let mostFrequentDigit = null;
-  let highestPercentage = 0;
+  // LOGIC: Count how many digits are 5 or BELOW.
+  // In Digit Over 5, these are the "Danger Digits" that would cause a loss.
+  const smallDigits = lastFive.filter(d => d <= 5).length;
 
-  for (let i = 0; i < 10; i++) {
-    const pct = (counts[i] / total) * 100;
-    if (pct > highestPercentage) {
-      highestPercentage = pct;
-      mostFrequentDigit = i;
-    }
-  }
-
-  // Trigger: If a digit appears > 18% of the time, bet that the next one WON'T be it
-  if (highestPercentage > 18) {
-    return mostFrequentDigit;
+  /**
+   * TRIGGER: If 4 out of the last 5 digits were 0, 1, 2, 3, 4, or 5,
+   * it indicates a "Low Trend." Statistical probability suggests a 
+   * "High Digit" (6-9) is coming soon.
+   */
+  if (smallDigits >= 4) {
+    console.log(`[STRATEGY] Low Digit Cluster Found (${smallDigits}/5). Prediction: OVER 5`);
+    // Return "5" as the barrier for DIGITOVER
+    return "5"; 
   }
 
   return null;
