@@ -1,4 +1,10 @@
-// src/bot/riskManager.js
+/**
+ * src/bot/riskManager.js
+ * Optimized for Digit Over 5 Strategy with Martingale Recovery
+ */
+
+// Track multiplier in memory for the session
+let currentMultiplier = 1;
 
 /**
  * NEW FUNCTION: Call this after every trade to update the user object
@@ -12,34 +18,47 @@ export function updateStats(user, profit) {
 
   // Increment counts
   user.tradesToday += 1;
-  user.totalProfit += Number(profit);
+  const tradeProfit = Number(profit);
+  user.totalProfit += tradeProfit;
+
+  // --- MARTINGALE LOGIC ---
+  if (tradeProfit < 0) {
+    // LOSS: Increase multiplier to recover (2.5 is ideal for Over 5 payout)
+    currentMultiplier *= 2.5; 
+    console.log(`[RISK] Loss detected. Increasing multiplier to: ${currentMultiplier}`);
+  } else {
+    // WIN: Reset back to base stake
+    currentMultiplier = 1;
+    console.log(`[RISK] Win detected. Resetting multiplier.`);
+  }
 
   console.log(`[STATS UPDATE] ${user.userId}: Trades Today: ${user.tradesToday} | Session Profit: ${user.totalProfit.toFixed(2)}`);
 }
 
 /**
- * Calculates the stake based on balance or user preference
+ * Calculates the stake based on balance or user preference + Martingale
  */
 export function calculateStake(user = {}) {
   try {
     const balance = Number(user.currentBalance || 0);
     
-    // 1. If a fixed baseStake is set (e.g., 5.0), use it
+    // 1. Determine the base starting stake
+    let base;
     if (user.baseStake && Number(user.baseStake) > 0) {
-      return Number(user.baseStake);
+      base = Number(user.baseStake);
+    } else {
+      // Fallback: 1% of balance or 0.35 minimum
+      base = Math.max(0.35, +(balance * 0.01).toFixed(2));
     }
 
-    // 2. Otherwise use a percentage (default 1% if not set)
-    const percent = Number(user.stakePercent) || 0.01; 
-    const rawStake = +(balance * percent).toFixed(2);
+    // 2. Apply the Martingale multiplier
+    const rawStake = +(base * currentMultiplier).toFixed(2);
 
-    // 3. Ensure it's not below the Deriv minimum (0.35)
-    const finalStake = Math.max(0.35, rawStake);
+    // 3. Safety Check: Never stake more than the current balance
+    const safetyStake = Math.min(rawStake, balance * 0.5); // Cap at 50% balance per trade
 
-    // 4. Optional: Cap the stake if you have a maxStake limit
-    if (user.maxStake && finalStake > Number(user.maxStake)) {
-      return Number(user.maxStake);
-    }
+    // 4. Ensure it's not below the Deriv minimum (0.35)
+    const finalStake = Math.max(0.35, safetyStake);
 
     return finalStake;
   } catch (e) {
@@ -71,15 +90,10 @@ export function checkLimits(user = {}) {
       return 'DAILY_LIMIT';
     }
 
-    // Stop-loss / Drawdown guard
-    if (user.startBalance && user.startBalance > 0) {
-      const stopLossAmount = Number(user.stopLoss) || 50; 
-      const currentLoss = user.startBalance - balance;
-      
-      if (currentLoss >= stopLossAmount) {
-        console.log(`[LIMITS] user=${user.userId} result=STOP_LOSS_REACHED loss=${currentLoss}`);
-        return 'STOP_LOSS_REACHED';
-      }
+    // Stop-loss / Max Profit target check
+    if (user.targetProfit && user.totalProfit >= user.targetProfit) {
+        console.log(`[LIMITS] Target Profit Reached: ${user.totalProfit}`);
+        return 'TARGET_REACHED';
     }
 
     return 'OK';
