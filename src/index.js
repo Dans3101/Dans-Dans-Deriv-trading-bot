@@ -36,6 +36,10 @@ async function bootBot(userData) {
 
   const session = new UserSession({ ...userData, apiToken });
   const bot = new DerivBot(session);
+  
+  // Flag to tell DerivBot to capture the first balance message as startBalance
+  bot.user.needsStartBalance = true; 
+
   bot.connect();
   bots.set(userData.userId, bot);
   console.log(`🚀 Bot Instance Created: ${userData.userId}`);
@@ -48,15 +52,15 @@ function generateStaffPerformanceTable() {
   if (bots.size === 0) return '<tr><td colspan="5" style="text-align:center; padding:15px; color:#888;">No active trading sessions.</td></tr>';
   let rows = "";
   bots.forEach((bot, id) => {
-    const balance = bot.user?.currentBalance || 0;
-    const startBalance = bot.user?.startBalance || balance;
-    const profit = (balance - startBalance).toFixed(2);
+    const balance = Number(bot.user?.currentBalance || 0);
+    // Updated to use the tracked lifetime profit from riskManager
+    const profit = Number(bot.user?.totalProfit || 0).toFixed(2);
     const color = profit >= 0 ? "#27ae60" : "#e74c3c";
     
     rows += `
       <tr>
         <td><b>${id}</b></td>
-        <td style="font-weight:bold;">$${Number(balance).toFixed(2)}</td>
+        <td style="font-weight:bold;">$${balance.toFixed(2)}</td>
         <td style="color:${color}; font-weight:bold;">$${profit}</td>
         <td>🟢 Live</td>
         <td>
@@ -85,20 +89,20 @@ function generateUserStats(shortId) {
 
     if (!userData) return `<div style="color:#d91e18; padding:10px; font-weight:bold;">❌ No active bot found for ID ending in "${shortId}".</div>`;
 
-    const balance = userData.user?.currentBalance || 0;
-    const startBalance = userData.user?.startBalance || balance;
-    const profit = (balance - startBalance).toFixed(2);
-    const color = profit >= 0 ? "#27ae60" : "#e74c3c";
-    const trades = userData.user?.totalTrades || 0;
+    const balance = Number(userData.user?.currentBalance || 0);
+    // pulling totalProfit and tradesToday directly from the bot's live user object
+    const lifetimeProfit = Number(userData.user?.totalProfit || 0).toFixed(2);
+    const color = lifetimeProfit >= 0 ? "#27ae60" : "#e74c3c";
+    const trades = userData.user?.tradesToday || 0;
 
     return `
         <div style="background:#f8f9fa; border-radius:12px; padding:20px; text-align:left; border:1px solid #eee;">
             <h4 style="margin:0 0 15px 0; color:#2c3e50;">Bot: ${foundId}</h4>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
-                <div><small>Balance</small><br><b style="font-size:18px;">$${Number(balance).toFixed(2)}</b></div>
-                <div><small>Profit</small><br><b style="font-size:18px; color:${color};">${profit >= 0 ? '+' : ''}${profit}</b></div>
-                <div><small>Trades</small><br><b style="font-size:18px;">${trades}</b></div>
-                <div><small>Status</small><br><b style="color:#27ae60;">ACTIVE</b></div>
+                <div><small>Balance</small><br><b style="font-size:18px;">$${balance.toFixed(2)}</b></div>
+                <div><small>Lifetime Profit</small><br><b style="font-size:18px; color:${color};">${lifetimeProfit >= 0 ? '+' : ''}${lifetimeProfit}</b></div>
+                <div><small>Trades Today</small><br><b style="font-size:18px;">${trades}</b></div>
+                <div><small>Status</small><br><b style="color:#27ae60;">ACTIVE (OVER 5)</b></div>
             </div>
             <div style="text-align:center; margin-top:15px;"><a href="/" style="font-size:12px; color:#999; text-decoration:none;">Refresh / Close</a></div>
         </div>`;
