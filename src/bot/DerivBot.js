@@ -27,10 +27,8 @@ class AccumulatorBot {
   }
 
   placeTrade(prediction, stake) {
-    // NEW CHECK: Prevent trade if the bot status is 'stopped' or limit is reached
     if (!this.user.active || !this.user.isRunning || this.inTrade || !canTrade(this.user)) return;
 
-    // NEW CHECK: Trade Limit Logic
     if (this.user.tradeLimit > 0 && this.user.tradesToday >= this.user.tradeLimit) {
         console.log(`[${this.user.userId}] Trade limit reached. Stopping.`);
         this.user.isRunning = false;
@@ -72,10 +70,15 @@ class AccumulatorBot {
     const profit = Number(contract.profit);
     const result = profit >= 0 ? 'WIN' : 'LOSS';
     
+    // 1. Update Session Stats (Resettable)
     updateStats(this.user, profit);
     
-    console.log(`[${this.user.userId}] 💰 ${result}: $${profit.toFixed(2)} | Today: ${this.user.tradesToday}`);
+    // 2. Update Lifetime Profit (Permanent)
+    this.user.lifetimeProfit = (Number(this.user.lifetimeProfit) || 0) + profit;
     
+    console.log(`[${this.user.userId}] 💰 ${result}: $${profit.toFixed(2)} | Session: $${this.user.totalProfit.toFixed(2)} | Lifetime: $${this.user.lifetimeProfit.toFixed(2)}`);
+    
+    // 3. Log to CSV/File
     logTrade({
       userId: this.user.userId,
       market: this.user.market,
@@ -94,13 +97,13 @@ export class DerivBot {
     this.user = user;
     this.user.active = false;
     
-    // NEW STATES: Tracking running status and limits
     this.user.isRunning = user.isRunning !== undefined ? user.isRunning : true;
-    this.user.tradeLimit = user.tradeLimit || 0; // 0 = unlimited
+    this.user.tradeLimit = user.tradeLimit || 0;
 
     this.user.currentBalance = 0;
     this.user.tradesToday = user.tradesToday || 0;
     this.user.totalProfit = user.totalProfit || 0;
+    this.user.lifetimeProfit = user.lifetimeProfit || 0; // NEW: Tracked from DB
     this.user.currentMultiplier = user.currentMultiplier || 1;
     
     if (!this.user.baseStake) this.user.baseStake = 2.0;
@@ -111,20 +114,19 @@ export class DerivBot {
     if (!this.user.market) this.user.market = 'R_100';
   }
 
-  // METHOD: Force stop the bot
   stop() {
     this.user.isRunning = false;
     console.log(`[${this.user.userId}] Bot manually stopped.`);
   }
 
-  // METHOD: Restart bot and reset all session stats to zero
   start(newLimit = 0) {
+    // Only resets Session stats, NOT lifetimeProfit
     this.user.tradesToday = 0;
     this.user.totalProfit = 0;
-    this.user.currentMultiplier = 1; // Resets Martingale
+    this.user.currentMultiplier = 1; 
     this.user.tradeLimit = newLimit;
     this.user.isRunning = true;
-    console.log(`[${this.user.userId}] Bot Reset & Started with limit: ${newLimit}`);
+    console.log(`[${this.user.userId}] Bot Session Reset. Lifetime stays at $${this.user.lifetimeProfit.toFixed(2)}`);
   }
 
   connect() {
