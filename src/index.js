@@ -1,18 +1,24 @@
 import 'dotenv/config';
-import fs from 'fs';
-import path from 'path';
 import express from 'express';
 import { fileURLToPath } from 'url';
+import path from 'path';
+import pg from 'pg'; // Import Supabase driver
 import { UserSession } from './users/userSession.js';
 import { DerivBot } from './bot/DerivBot.js';
 import { listenTelegramAdmin } from './notifications/telegramAdmin.js';
 
+const { Pool } = pg;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const usersFilePath = path.join(__dirname, '../users.json');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+/* ================= DATABASE CONFIG ================= */
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 /* ================= CONFIGURATION ================= */
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
@@ -36,9 +42,9 @@ async function bootBot(userData) {
   const session = new UserSession({
     ...userData,
     apiToken,
-    totalProfit: userData.totalProfit || 0,
-    tradesToday: userData.tradesToday || 0,
-    currentMultiplier: userData.currentMultiplier || 1
+    totalProfit: Number(userData.totalProfit) || 0,
+    tradesToday: Number(userData.tradesToday) || 0,
+    currentMultiplier: Number(userData.currentMultiplier) || 1
   });
 
   const bot = new DerivBot(session);
@@ -109,7 +115,6 @@ app.get('/', (req, res) => {
         .btn-connect { background: var(--primary); color: white; border: none; padding: 18px; border-radius: 12px; cursor: pointer; font-weight: bold; width: 100%; font-size: 16px; }
         .btn-track { background: var(--dark); color: white; border: none; padding: 12px; border-radius: 10px; cursor: pointer; font-weight: bold; width: 100%; }
         .help-btn { display: block; margin-top: 15px; color: var(--dark); font-weight: bold; text-decoration: none; border: 2px solid #ddd; padding: 12px; border-radius: 12px; }
-        .back-link { display: inline-block; margin-top: 15px; color: #777; text-decoration: none; font-size: 14px; }
       </style>
     </head>
     <body>
@@ -143,12 +148,12 @@ app.post('/payment-page', (req, res) => {
   pendingUsers.set(tempId, { apiToken });
   res.send(`
     <div style="max-width:400px; margin: 60px auto; font-family: sans-serif; text-align:center; padding:30px; background:white; border-radius:20px; box-shadow:0 10px 30px rgba(0,0,0,0.1);">
-      <h2 style="color:#2c3e50;">Payment Details</h2>
+      <h2>Payment Details</h2>
       <p>Send <b>${SUB_PRICE}</b> to M-Pesa:</p>
       <h1 style="color:#1a1a1a;">${PAYMENT_NUMBER}</h1>
-      <p>Your ID: <b style="background:#eee; padding:5px; border-radius:4px;">${tempId}</b></p>
+      <p>Your ID: <b>${tempId}</b></p>
       <a href="${HELP_LINK}" style="display:block; background:#2c3e50; color:white; padding:18px; text-decoration:none; border-radius:12px; font-weight:bold; margin-top:20px;">✅ I Have Paid</a>
-      <a href="/" style="display:block; margin-top:20px; color:#777; text-decoration:none; font-size:14px;">← Go Back / Cancel</a>
+      <a href="/" style="display:block; margin-top:20px; color:#777; text-decoration:none; font-size:14px;">← Go Back</a>
     </div>
   `);
 });
@@ -163,18 +168,17 @@ app.get('/admin-login', (req, res) => {
         <input type="password" name="password" placeholder="Admin Password" required style="width:100%; padding:10px; margin-bottom:10px;">
         <button type="submit" style="width:100%; padding:10px; background:#2c3e50; color:white; border:none; cursor:pointer;">Login</button>
       </form>
-      <a href="/" style="display:block; margin-top:20px; color:#777; text-decoration:none; font-size:14px;">← Back to Home</a>
     </div>
   `);
 });
 
 app.post('/admin-portal', (req, res) => {
   const { password } = req.body;
-  if (password !== ADMIN_PASSWORD) return res.send("Denied. <a href='/admin-login'>Try Again</a>");
+  if (password !== ADMIN_PASSWORD) return res.send("Denied. <a href='/admin-login'>Back</a>");
 
   let pendingRows = "";
   pendingUsers.forEach((data, id) => {
-    pendingRows += `<tr><td>${id}</td><td><form action="/manual-activate" method="POST"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit" style="background:green; color:white; border:none; padding:5px 10px; border-radius:5px; cursor:pointer;">Approve</button></form></td></tr>`;
+    pendingRows += `<tr><td>${id}</td><td><form action="/manual-activate" method="POST"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit">Approve</button></form></td></tr>`;
   });
 
   res.send(`
@@ -183,24 +187,17 @@ app.post('/admin-portal', (req, res) => {
       <form id="refresh-form" action="/admin-portal" method="POST" style="display:none;"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"></form>
       <div style="max-width:1100px; margin:auto; background:white; padding:25px; border-radius:15px; box-shadow:0 4px 12px rgba(0,0,0,0.1);">
         <div style="display:flex; justify-content:space-between; align-items:center;">
-            <h1 style="color:#2c3e50; margin:0;">🛡️ Staff Dashboard</h1>
-            <a href="/" style="background:#eee; padding:8px 15px; color:#333; text-decoration:none; border-radius:5px; font-weight:bold; font-size:13px;">Logout / Exit</a>
+            <h1>🛡️ Staff Dashboard</h1>
+            <a href="/" style="text-decoration:none; color:#333;">Logout</a>
         </div>
-        <hr style="margin:20px 0; border:0; border-top:1px solid #eee;">
         <div style="display:grid; grid-template-columns: 1fr 2fr; gap:25px;">
           <div>
-            <h3>Pending Activation</h3>
-            <table border="1" width="100%" style="border-collapse:collapse; background:#fafafa;">
-                <tr style="background:#eee;"><th>User ID</th><th>Action</th></tr>
-                ${pendingRows || '<tr><td colspan="2" style="text-align:center; padding:10px;">None</td></tr>'}
-            </table>
+            <h3>Pending</h3>
+            <table border="1" width="100%">${pendingRows || '<tr><td>None</td></tr>'}</table>
           </div>
           <div>
             <h3>Live Performance</h3>
-            <table border="1" width="100%" style="border-collapse:collapse; text-align:left;">
-              <tr style="background:#eee;"><th>User ID</th><th>Balance</th><th>Profit</th><th>Status</th><th>Action</th></tr>
-              ${generateStaffPerformanceTable()}
-            </table>
+            <table border="1" width="100%">${generateStaffPerformanceTable()}</table>
           </div>
         </div>
       </div>
@@ -214,58 +211,72 @@ app.post('/manual-activate', async (req, res) => {
   const { userId, password } = req.body;
   if (password === ADMIN_PASSWORD && pendingUsers.has(userId)) {
     const data = pendingUsers.get(userId);
-    const newUser = { userId, apiToken: data.apiToken, market: 'R_100', active: true, totalProfit: 0, tradesToday: 0, currentMultiplier: 1 };
-
+    
     try {
-        let currentData = { users: [] };
-        if (fs.existsSync(usersFilePath)) currentData = JSON.parse(fs.readFileSync(usersFilePath, 'utf8'));
-        currentData.users = currentData.users.filter(u => u.userId !== userId);
-        currentData.users.push(newUser);
-        fs.writeFileSync(usersFilePath, JSON.stringify(currentData, null, 2));
-    } catch (e) { console.error(e); }
+      // SAVE TO SUPABASE
+      await pool.query(
+        `INSERT INTO users (user_id, api_token, active, total_profit, trades_today, current_multiplier) 
+         VALUES ($1, $2, true, 0, 0, 1)
+         ON CONFLICT (user_id) DO UPDATE SET active = true, api_token = $2`,
+        [userId, data.apiToken]
+      );
 
-    await bootBot(newUser);
-    pendingUsers.delete(userId);
-    res.send(`
-        <div style="text-align:center; font-family:sans-serif; margin-top:50px;">
-            <h2>✅ User ${userId} Activated Successfully!</h2>
-            <form action="/admin-portal" method="POST">
-                <input type="hidden" name="password" value="${ADMIN_PASSWORD}">
-                <button type="submit" style="padding:15px 30px; background:#2c3e50; color:white; border:none; border-radius:8px; cursor:pointer;">Return to Dashboard</button>
-            </form>
-        </div>
-    `);
+      await bootBot({ userId, apiToken: data.apiToken, totalProfit: 0, tradesToday: 0, currentMultiplier: 1 });
+      pendingUsers.delete(userId);
+      res.send(`Activated! <form action="/admin-portal" method="POST"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button>Back</button></form>`);
+    } catch (e) {
+      res.status(500).send("DB Error: " + e.message);
+    }
   }
 });
 
-app.post('/delete', (req, res) => {
+app.post('/delete', async (req, res) => {
   const { userId, password } = req.body;
   if (password === ADMIN_PASSWORD) {
     const bot = bots.get(userId);
     if (bot?.user?.ws) bot.user.ws.terminate();
     bots.delete(userId);
+    
     try {
-        let currentData = JSON.parse(fs.readFileSync(usersFilePath, 'utf8'));
-        currentData.users = currentData.users.filter(u => u.userId !== userId);
-        fs.writeFileSync(usersFilePath, JSON.stringify(currentData, null, 2));
-    } catch (e) {}
+      // REMOVE FROM SUPABASE
+      await pool.query("DELETE FROM users WHERE user_id = $1", [userId]);
+    } catch (e) { console.error(e); }
   }
-  // Redirect back to admin portal with a hidden form submit (using script)
-  res.send(`
-    <form id="back" action="/admin-portal" method="POST"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"></form>
-    <script>document.getElementById('back').submit();</script>
-  `);
+  res.send(`<form id="back" action="/admin-portal" method="POST"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"></form><script>document.getElementById('back').submit();</script>`);
 });
 
 /* ================= STARTUP ================= */
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🌐 Server Running: Port ${PORT}`);
-  if (fs.existsSync(usersFilePath)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(usersFilePath, 'utf8'));
-      if (data.users) data.users.forEach(u => { if (u.active) bootBot(u); });
-    } catch (e) {}
+
+  try {
+    // 1. Create Table if not exists
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        api_token TEXT,
+        total_profit NUMERIC DEFAULT 0,
+        trades_today INTEGER DEFAULT 0,
+        current_multiplier NUMERIC DEFAULT 1,
+        active BOOLEAN DEFAULT true
+      )
+    `);
+
+    // 2. Load users from Supabase
+    const result = await pool.query("SELECT * FROM users WHERE active = true");
+    result.rows.forEach(u => {
+      bootBot({
+        userId: u.user_id,
+        apiToken: u.api_token,
+        totalProfit: u.total_profit,
+        tradesToday: u.trades_today,
+        currentMultiplier: u.current_multiplier
+      });
+    });
+  } catch (e) {
+    console.error("DB Startup Error:", e.message);
   }
+
   if (!global.telegramStarted) {
     global.telegramStarted = true;
     listenTelegramAdmin(bots);
