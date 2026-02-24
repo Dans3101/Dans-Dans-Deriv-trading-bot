@@ -19,7 +19,6 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 const PAYMENT_NUMBER = "0713811622"; 
 const HELP_LINK = "https://wa.me/message/WW67ZG52UQHOO1"; 
 const SUB_PRICE = "100 KSH";
-const DURATION = "7 Days (1 Week)";
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -37,23 +36,23 @@ async function bootBot(userData) {
   const session = new UserSession({ ...userData, apiToken });
   const bot = new DerivBot(session);
   
-  // Flag to tell DerivBot to capture the first balance message as startBalance
-  bot.user.needsStartBalance = true; 
+  // PERSISTENCE: Restore saved stats into the live instance
+  bot.user.totalProfit = userData.totalProfit || 0;
+  bot.user.tradesToday = userData.tradesToday || 0;
+  bot.user.active = true;
 
   bot.connect();
   bots.set(userData.userId, bot);
-  console.log(`🚀 Bot Instance Created: ${userData.userId}`);
+  console.log(`🚀 Bot Instance Created/Restored: ${userData.userId}`);
 }
 
 /* ================= UI GENERATORS ================= */
 
-// Generate Private Staff View
 function generateStaffPerformanceTable() {
   if (bots.size === 0) return '<tr><td colspan="5" style="text-align:center; padding:15px; color:#888;">No active trading sessions.</td></tr>';
   let rows = "";
   bots.forEach((bot, id) => {
     const balance = Number(bot.user?.currentBalance || 0);
-    // Updated to use the tracked lifetime profit from riskManager
     const profit = Number(bot.user?.totalProfit || 0).toFixed(2);
     const color = profit >= 0 ? "#27ae60" : "#e74c3c";
     
@@ -75,36 +74,26 @@ function generateStaffPerformanceTable() {
   return rows;
 }
 
-// Generate Individual User Stats View
 function generateUserStats(shortId) {
     let userData = null;
     let foundId = null;
+    bots.forEach((bot, id) => { if (id.endsWith(shortId)) { userData = bot; foundId = id; } });
 
-    bots.forEach((bot, id) => {
-        if (id.endsWith(shortId)) {
-            userData = bot;
-            foundId = id;
-        }
-    });
-
-    if (!userData) return `<div style="color:#d91e18; padding:10px; font-weight:bold;">❌ No active bot found for ID ending in "${shortId}".</div>`;
+    if (!userData) return `<div style="color:#d91e18; padding:10px; font-weight:bold;">❌ No active bot found.</div>`;
 
     const balance = Number(userData.user?.currentBalance || 0);
-    // pulling totalProfit and tradesToday directly from the bot's live user object
     const lifetimeProfit = Number(userData.user?.totalProfit || 0).toFixed(2);
     const color = lifetimeProfit >= 0 ? "#27ae60" : "#e74c3c";
-    const trades = userData.user?.tradesToday || 0;
 
     return `
         <div style="background:#f8f9fa; border-radius:12px; padding:20px; text-align:left; border:1px solid #eee;">
             <h4 style="margin:0 0 15px 0; color:#2c3e50;">Bot: ${foundId}</h4>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
                 <div><small>Balance</small><br><b style="font-size:18px;">$${balance.toFixed(2)}</b></div>
-                <div><small>Lifetime Profit</small><br><b style="font-size:18px; color:${color};">${lifetimeProfit >= 0 ? '+' : ''}${lifetimeProfit}</b></div>
-                <div><small>Trades Today</small><br><b style="font-size:18px;">${trades}</b></div>
-                <div><small>Status</small><br><b style="color:#27ae60;">ACTIVE (OVER 5)</b></div>
+                <div><small>Lifetime Profit</small><br><b style="font-size:18px; color:${color};">$${lifetimeProfit}</b></div>
+                <div><small>Trades</small><br><b style="font-size:18px;">${userData.user.tradesToday}</b></div>
+                <div><small>Status</small><br><b style="color:#27ae60;">ACTIVE</b></div>
             </div>
-            <div style="text-align:center; margin-top:15px;"><a href="/" style="font-size:12px; color:#999; text-decoration:none;">Refresh / Close</a></div>
         </div>`;
 }
 
@@ -133,30 +122,21 @@ app.get('/', (req, res) => {
     <body>
       <div class="hero"><h1>Dans-Dans Trading Bot</h1></div>
       <div class="container">
-        
-        ${trackId ? `<div class="card" style="border: 2px solid var(--primary);">${generateUserStats(trackId)}</div>` : ''}
-
+        ${trackId ? `<div class="card">${generateUserStats(trackId)}</div>` : ''}
         <div class="card">
           <div style="background:#e8f5e9; color:#2e7d32; padding:5px 15px; border-radius:50px; display:inline-block; font-weight:bold; font-size:12px; margin-bottom:10px;">💰 ${SUB_PRICE} / Week</div>
           <form action="/payment-page" method="POST">
             <input type="text" name="apiToken" placeholder="Paste Deriv API Token" required>
             <button type="submit" class="btn-connect">Connect & Launch Bot</button>
           </form>
-          <div style="text-align:left; font-size:13px; color:#666; background:#fafafa; padding:15px; border-radius:10px; margin-top:20px;">
-             <b>How to get token:</b> Deriv Settings > API Token > Check "Read" & "Trade".
-          </div>
           <a href="${HELP_LINK}" class="help-btn" target="_blank">Chat Admin for Help</a>
         </div>
-
         <div class="card">
-           <h4 style="margin:0 0 10px 0;">Track My Bot Progress</h4>
            <form action="/" method="GET">
-              <input type="text" name="trackId" placeholder="Enter last 4 digits of ID (e.g. 001)" required>
+              <input type="text" name="trackId" placeholder="Enter last 4 digits of ID" required>
               <button type="submit" class="btn-track">View My Live Stats</button>
            </form>
         </div>
-
-        <div style="text-align:center;"><a href="/admin-login" style="color:#ccc; text-decoration:none; font-size:11px;">Staff Portal</a></div>
       </div>
     </body>
     </html>
@@ -168,53 +148,13 @@ app.post('/payment-page', (req, res) => {
   const tempId = `User_${Math.floor(1000 + Math.random() * 9000)}`;
   pendingUsers.set(tempId, { apiToken });
   res.send(`
-    <div style="max-width:400px; margin: 60px auto; font-family: sans-serif; text-align:center; padding:30px; background:white; border-radius:20px; box-shadow:0 10px 30px rgba(0,0,0,0.1);">
-      <h2 style="color:#2c3e50;">One More Step...</h2>
-      <div style="background:#f1f8f3; padding:20px; border-radius:15px; border: 2px dashed #27ae60; margin:20px 0;">
-        <p>Send <b>${SUB_PRICE}</b> to M-Pesa:</p>
-        <h1 style="color:#1a1a1a;">${PAYMENT_NUMBER}</h1>
-      </div>
-      <p>Your ID: <b style="background:#eee; padding:5px; border-radius:4px;">${tempId}</b></p>
-      <a href="${HELP_LINK}" style="display:block; background:#2c3e50; color:white; padding:18px; text-decoration:none; border-radius:12px; font-weight:bold; margin-top:20px;">✅ I Have Paid (Activate Now)</a>
+    <div style="max-width:400px; margin: 60px auto; font-family: sans-serif; text-align:center; padding:30px; background:white; border-radius:20px;">
+      <h2>Payment Details</h2>
+      <p>Send <b>${SUB_PRICE}</b> to M-Pesa:</p>
+      <h1>${PAYMENT_NUMBER}</h1>
+      <p>Your ID: <b>${tempId}</b></p>
+      <a href="${HELP_LINK}">✅ I Have Paid</a>
     </div>
-  `);
-});
-
-/* ================= STAFF SECTION (WITH AUTO-REFRESH) ================= */
-
-app.get('/admin-login', (req, res) => {
-  res.send(`
-    <div style="max-width:300px; margin: 100px auto; font-family: sans-serif; text-align:center;">
-      <form action="/admin-portal" method="POST">
-        <input type="password" name="password" placeholder="Admin Password" style="width:100%; padding:10px; margin-bottom:10px;">
-        <button type="submit" style="width:100%; padding:10px; background:#2c3e50; color:white; border:none; cursor:pointer;">Login</button>
-      </form>
-    </div>
-  `);
-});
-
-app.post('/admin-portal', (req, res) => {
-  const { password } = req.body;
-  if (password !== ADMIN_PASSWORD) return res.send("Denied");
-
-  let pendingRows = "";
-  pendingUsers.forEach((data, id) => {
-    pendingRows += `<tr><td>${id}</td><td><form action="/manual-activate" method="POST" style="margin:0;"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit" style="background:green; color:white; border:none; padding:5px 10px; border-radius:5px; cursor:pointer;">Approve</button></form></td></tr>`;
-  });
-
-  res.send(`
-    <body style="font-family:sans-serif; padding:20px; background:#f0f2f5;">
-      <script>setTimeout(() => { document.getElementById('refresh-form').submit(); }, 10000);</script>
-      <form id="refresh-form" action="/admin-portal" method="POST" style="display:none;"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"></form>
-      <div style="max-width:1000px; margin:auto; background:white; padding:30px; border-radius:20px; box-shadow:0 5px 15px rgba(0,0,0,0.05);">
-        <h1>🛡️ Staff Dashboard <small style="font-size:12px; color:blue;">(Live Refreshing...)</small></h1>
-        <div style="display:grid; grid-template-columns: 1fr 2fr; gap:30px;">
-          <div><h3>Pending</h3><table border="1" width="100%">${pendingRows || '<tr><td>None</td></tr>'}</table></div>
-          <div><h3>Performance</h3><table border="1" width="100%" style="border-collapse:collapse; text-align:left;"><tr style="background:#eee;"><th>User</th><th>Balance</th><th>Profit</th><th>Status</th><th>Action</th></tr>${generateStaffPerformanceTable()}</table></div>
-        </div>
-        <div style="text-align:center; margin-top:30px;"><a href="/">Logout</a></div>
-      </div>
-    </body>
   `);
 });
 
@@ -224,7 +164,30 @@ app.post('/manual-activate', async (req, res) => {
   const { userId, password } = req.body;
   if (password === ADMIN_PASSWORD && pendingUsers.has(userId)) {
     const data = pendingUsers.get(userId);
-    await bootBot({ userId, apiToken: data.apiToken, market: 'R_100', active: true, minStake: 0.35 });
+    
+    // Create the persistent user object
+    const newUser = { 
+        userId, 
+        apiToken: data.apiToken, 
+        market: 'R_100', 
+        active: true, 
+        totalProfit: 0, 
+        tradesToday: 0 
+    };
+
+    // 1. Save to users.json immediately so it survives a deploy
+    try {
+        let currentData = { users: [] };
+        if (fs.existsSync(usersFilePath)) {
+            currentData = JSON.parse(fs.readFileSync(usersFilePath, 'utf8'));
+        }
+        currentData.users = currentData.users.filter(u => u.userId !== userId);
+        currentData.users.push(newUser);
+        fs.writeFileSync(usersFilePath, JSON.stringify(currentData, null, 2));
+    } catch (e) { console.error("Error saving user:", e); }
+
+    // 2. Start the bot
+    await bootBot(newUser);
     pendingUsers.delete(userId);
     res.send(`Activated! <form action="/admin-portal" method="POST"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button>Back</button></form>`);
   }
@@ -232,33 +195,38 @@ app.post('/manual-activate', async (req, res) => {
 
 app.post('/delete', (req, res) => {
   const { userId, password } = req.body;
-  if (password === ADMIN_PASSWORD && bots.has(userId)) {
+  if (password === ADMIN_PASSWORD) {
     const bot = bots.get(userId);
-    if (bot.user?.ws) bot.user.ws.terminate();
+    if (bot?.user?.ws) bot.user.ws.terminate();
     bots.delete(userId);
+    
+    // Remove from JSON file so it doesn't restart on deploy
+    try {
+        let currentData = JSON.parse(fs.readFileSync(usersFilePath, 'utf8'));
+        currentData.users = currentData.users.filter(u => u.userId !== userId);
+        fs.writeFileSync(usersFilePath, JSON.stringify(currentData, null, 2));
+    } catch (e) {}
   }
-  res.send(`Removed. <form action="/admin-portal" method="POST"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button>Back</button></form>`);
-});
-
-// Automation Endpoint
-app.post('/api/payment-webhook', async (req, res) => {
-    const { userId, status } = req.body;
-    if ((status === 'SUCCESS') && pendingUsers.has(userId)) {
-        const data = pendingUsers.get(userId);
-        await bootBot({ userId, apiToken: data.apiToken, market: 'R_100', active: true });
-        pendingUsers.delete(userId);
-        return res.sendStatus(200);
-    }
-    res.sendStatus(400);
+  res.redirect('/');
 });
 
 /* ================= STARTUP ================= */
 app.listen(PORT, () => {
   console.log(`🌐 Server Running: Port ${PORT}`);
+  
+  // PERSISTENCE ENGINE: Reload all bots from the file on start
   if (fs.existsSync(usersFilePath)) {
-    const data = JSON.parse(fs.readFileSync(usersFilePath, 'utf8'));
-    (data.users || []).filter(u => u.active).forEach(u => bootBot(u));
+    try {
+      const data = JSON.parse(fs.readFileSync(usersFilePath, 'utf8'));
+      if (data.users && data.users.length > 0) {
+        console.log(`♻️ Reloading ${data.users.length} bots from storage...`);
+        data.users.forEach(u => {
+           if (u.active) bootBot(u); 
+        });
+      }
+    } catch (e) { console.error("Startup Reload Error:", e); }
   }
+
   if (!global.telegramStarted) {
     global.telegramStarted = true;
     listenTelegramAdmin(bots);
