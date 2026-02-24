@@ -49,7 +49,6 @@ async function bootBot(userData) {
 
 /* ================= UI GENERATORS ================= */
 
-// 1. For the User Dashboard (Tracking Card)
 function generateUserStats(shortId) {
     let userData = null;
     let fullId = null;
@@ -70,10 +69,10 @@ function generateUserStats(shortId) {
                 <div><small>Trades</small><br><b style="font-size:18px;">${userData.user.tradesToday}</b></div>
                 <div><small>Status</small><br><b style="color:#27ae60;">ACTIVE</b></div>
             </div>
+            <div style="text-align:center; margin-top:10px;"><a href="/" style="color:#999; font-size:12px; text-decoration:none;">← Close Tracking</a></div>
         </div>`;
 }
 
-// 2. For the Staff Dashboard (Admin Table)
 function generateStaffPerformanceTable() {
   if (bots.size === 0) return '<tr><td colspan="5" style="text-align:center; padding:15px; color:#888;">No active sessions.</td></tr>';
   let rows = "";
@@ -84,7 +83,7 @@ function generateStaffPerformanceTable() {
         <td>$${Number(bot.user?.currentBalance || 0).toFixed(2)}</td>
         <td style="color:${profit >= 0 ? '#27ae60' : '#e74c3c'}; font-weight:bold;">$${profit}</td>
         <td>🟢 Live</td>
-        <td><form action="/delete" method="POST" style="margin:0;"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit" style="background:#ff4757; color:white; border:none; border-radius:4px; cursor:pointer;">Kill</button></form></td>
+        <td><form action="/delete" method="POST" style="margin:0;"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit" style="background:#ff4757; color:white; border:none; border-radius:4px; cursor:pointer; padding:5px 10px;">Kill</button></form></td>
     </tr>`;
   });
   return rows;
@@ -92,7 +91,6 @@ function generateStaffPerformanceTable() {
 
 /* ================= WEB ROUTES ================= */
 
-// USER DASHBOARD (Home Page)
 app.get('/', (req, res) => {
   const trackId = req.query.trackId;
   res.send(`
@@ -111,6 +109,7 @@ app.get('/', (req, res) => {
         .btn-connect { background: var(--primary); color: white; border: none; padding: 18px; border-radius: 12px; cursor: pointer; font-weight: bold; width: 100%; font-size: 16px; }
         .btn-track { background: var(--dark); color: white; border: none; padding: 12px; border-radius: 10px; cursor: pointer; font-weight: bold; width: 100%; }
         .help-btn { display: block; margin-top: 15px; color: var(--dark); font-weight: bold; text-decoration: none; border: 2px solid #ddd; padding: 12px; border-radius: 12px; }
+        .back-link { display: inline-block; margin-top: 15px; color: #777; text-decoration: none; font-size: 14px; }
       </style>
     </head>
     <body>
@@ -144,16 +143,18 @@ app.post('/payment-page', (req, res) => {
   pendingUsers.set(tempId, { apiToken });
   res.send(`
     <div style="max-width:400px; margin: 60px auto; font-family: sans-serif; text-align:center; padding:30px; background:white; border-radius:20px; box-shadow:0 10px 30px rgba(0,0,0,0.1);">
-      <h2 style="color:#2c3e50;">Payment Required</h2>
+      <h2 style="color:#2c3e50;">Payment Details</h2>
       <p>Send <b>${SUB_PRICE}</b> to M-Pesa:</p>
       <h1 style="color:#1a1a1a;">${PAYMENT_NUMBER}</h1>
-      <p>Your ID: <b>${tempId}</b></p>
+      <p>Your ID: <b style="background:#eee; padding:5px; border-radius:4px;">${tempId}</b></p>
       <a href="${HELP_LINK}" style="display:block; background:#2c3e50; color:white; padding:18px; text-decoration:none; border-radius:12px; font-weight:bold; margin-top:20px;">✅ I Have Paid</a>
+      <a href="/" style="display:block; margin-top:20px; color:#777; text-decoration:none; font-size:14px;">← Go Back / Cancel</a>
     </div>
   `);
 });
 
-// STAFF LOGIN & PORTAL
+/* ================= STAFF SECTION ================= */
+
 app.get('/admin-login', (req, res) => {
   res.send(`
     <div style="max-width:300px; margin: 100px auto; text-align:center; font-family:sans-serif;">
@@ -162,28 +163,45 @@ app.get('/admin-login', (req, res) => {
         <input type="password" name="password" placeholder="Admin Password" required style="width:100%; padding:10px; margin-bottom:10px;">
         <button type="submit" style="width:100%; padding:10px; background:#2c3e50; color:white; border:none; cursor:pointer;">Login</button>
       </form>
+      <a href="/" style="display:block; margin-top:20px; color:#777; text-decoration:none; font-size:14px;">← Back to Home</a>
     </div>
   `);
 });
 
 app.post('/admin-portal', (req, res) => {
   const { password } = req.body;
-  if (password !== ADMIN_PASSWORD) return res.send("Denied");
+  if (password !== ADMIN_PASSWORD) return res.send("Denied. <a href='/admin-login'>Try Again</a>");
 
   let pendingRows = "";
   pendingUsers.forEach((data, id) => {
-    pendingRows += `<tr><td>${id}</td><td><form action="/manual-activate" method="POST"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit">Approve</button></form></td></tr>`;
+    pendingRows += `<tr><td>${id}</td><td><form action="/manual-activate" method="POST"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit" style="background:green; color:white; border:none; padding:5px 10px; border-radius:5px; cursor:pointer;">Approve</button></form></td></tr>`;
   });
 
   res.send(`
     <body style="font-family:sans-serif; padding:20px; background:#f4f7f6;">
       <script>setTimeout(() => { document.getElementById('refresh-form').submit(); }, 12000);</script>
       <form id="refresh-form" action="/admin-portal" method="POST" style="display:none;"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"></form>
-      <div style="max-width:1000px; margin:auto; background:white; padding:25px; border-radius:15px;">
-        <h1>🛡️ Staff Dashboard <small style="font-size:12px; color:blue;">(Refreshing...)</small></h1>
-        <div style="display:grid; grid-template-columns: 1fr 2fr; gap:20px;">
-          <div><h3>Pending</h3><table border="1" width="100%">${pendingRows || '<tr><td>None</td></tr>'}</table></div>
-          <div><h3>Live Performance</h3><table border="1" width="100%" style="border-collapse:collapse; text-align:left;"><tr style="background:#eee;"><th>User</th><th>Balance</th><th>Profit</th><th>Status</th><th>Action</th></tr>${generateStaffPerformanceTable()}</table></div>
+      <div style="max-width:1100px; margin:auto; background:white; padding:25px; border-radius:15px; box-shadow:0 4px 12px rgba(0,0,0,0.1);">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h1 style="color:#2c3e50; margin:0;">🛡️ Staff Dashboard</h1>
+            <a href="/" style="background:#eee; padding:8px 15px; color:#333; text-decoration:none; border-radius:5px; font-weight:bold; font-size:13px;">Logout / Exit</a>
+        </div>
+        <hr style="margin:20px 0; border:0; border-top:1px solid #eee;">
+        <div style="display:grid; grid-template-columns: 1fr 2fr; gap:25px;">
+          <div>
+            <h3>Pending Activation</h3>
+            <table border="1" width="100%" style="border-collapse:collapse; background:#fafafa;">
+                <tr style="background:#eee;"><th>User ID</th><th>Action</th></tr>
+                ${pendingRows || '<tr><td colspan="2" style="text-align:center; padding:10px;">None</td></tr>'}
+            </table>
+          </div>
+          <div>
+            <h3>Live Performance</h3>
+            <table border="1" width="100%" style="border-collapse:collapse; text-align:left;">
+              <tr style="background:#eee;"><th>User ID</th><th>Balance</th><th>Profit</th><th>Status</th><th>Action</th></tr>
+              ${generateStaffPerformanceTable()}
+            </table>
+          </div>
         </div>
       </div>
     </body>
@@ -208,7 +226,15 @@ app.post('/manual-activate', async (req, res) => {
 
     await bootBot(newUser);
     pendingUsers.delete(userId);
-    res.send(`Activated! <form action="/admin-portal" method="POST"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button>Back</button></form>`);
+    res.send(`
+        <div style="text-align:center; font-family:sans-serif; margin-top:50px;">
+            <h2>✅ User ${userId} Activated Successfully!</h2>
+            <form action="/admin-portal" method="POST">
+                <input type="hidden" name="password" value="${ADMIN_PASSWORD}">
+                <button type="submit" style="padding:15px 30px; background:#2c3e50; color:white; border:none; border-radius:8px; cursor:pointer;">Return to Dashboard</button>
+            </form>
+        </div>
+    `);
   }
 });
 
@@ -224,7 +250,11 @@ app.post('/delete', (req, res) => {
         fs.writeFileSync(usersFilePath, JSON.stringify(currentData, null, 2));
     } catch (e) {}
   }
-  res.redirect('/admin-login');
+  // Redirect back to admin portal with a hidden form submit (using script)
+  res.send(`
+    <form id="back" action="/admin-portal" method="POST"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"></form>
+    <script>document.getElementById('back').submit();</script>
+  `);
 });
 
 /* ================= STARTUP ================= */
