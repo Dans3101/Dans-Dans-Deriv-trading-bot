@@ -27,14 +27,21 @@ class AccumulatorBot {
   }
 
   placeTrade(prediction, stake) {
-    if (!this.user.active || this.inTrade || !canTrade(this.user)) return;
+    // NEW CHECK: Prevent trade if the bot status is 'stopped' or limit is reached
+    if (!this.user.active || !this.user.isRunning || this.inTrade || !canTrade(this.user)) return;
+
+    // NEW CHECK: Trade Limit Logic
+    if (this.user.tradeLimit > 0 && this.user.tradesToday >= this.user.tradeLimit) {
+        console.log(`[${this.user.userId}] Trade limit reached. Stopping.`);
+        this.user.isRunning = false;
+        this.safeTelegram(`🛑 Bot ${this.user.userId} reached trade limit of ${this.user.tradeLimit}. Stopped.`);
+        return;
+    }
 
     const limits = checkLimits(this.user);
     if (limits !== 'OK') return;
 
-    // Use the dynamic stake calculated by riskManager (Martingale ready)
     const finalStake = stake || 2.0;
-
     this.inTrade = true;
 
     const payload = {
@@ -43,16 +50,15 @@ class AccumulatorBot {
       parameters: {
         amount: finalStake,
         basis: 'stake',
-        contract_type: 'DIGITOVER', // CHANGED: From DIGITDIFF to DIGITOVER
+        contract_type: 'DIGITOVER',
         currency: 'USD',
         duration: 1,
         duration_unit: 't',
         symbol: this.user.market || 'R_100',
-        barrier: "5" // CHANGED: Prediction is now Over 5 (Wins on 6, 7, 8, 9)
+        barrier: "5" 
       }
     };
 
-    console.log(`[${this.user.userId}] 🚀 PRINTING: Over 5 | Stake: $${finalStake}`);
     if (this.user.ws?.readyState === WebSocket.OPEN) {
       this.user.ws.send(JSON.stringify(payload));
     } else {
@@ -66,16 +72,14 @@ class AccumulatorBot {
     const profit = Number(contract.profit);
     const result = profit >= 0 ? 'WIN' : 'LOSS';
     
-    // updateStats handles the Martingale multiplier inside riskManager
     updateStats(this.user, profit);
     
     console.log(`[${this.user.userId}] 💰 ${result}: $${profit.toFixed(2)} | Today: ${this.user.tradesToday}`);
-    this.safeTelegram(`🔔 ${result} | P: $${profit.toFixed(2)} | Today: ${this.user.tradesToday} | Bal: ${this.user.currentBalance}`);
-
+    
     logTrade({
       userId: this.user.userId,
       market: this.user.market,
-      direction: 'DIGITOVER', // Updated log label
+      direction: 'DIGITOVER',
       stake: contract.buy_price || 0,
       profit,
       balance: this.user.currentBalance
@@ -89,11 +93,16 @@ export class DerivBot {
   constructor(user) {
     this.user = user;
     this.user.active = false;
-    this.user.currentBalance = 0;
-    this.user.tradesToday = 0;
-    this.user.totalProfit = 0;
     
-    // XML Settings: Target $607 profit, Base stake $2
+    // NEW STATES: Tracking running status and limits
+    this.user.isRunning = user.isRunning !== undefined ? user.isRunning : true;
+    this.user.tradeLimit = user.tradeLimit || 0; // 0 = unlimited
+
+    this.user.currentBalance = 0;
+    this.user.tradesToday = user.tradesToday || 0;
+    this.user.totalProfit = user.totalProfit || 0;
+    this.user.currentMultiplier = user.currentMultiplier || 1;
+    
     if (!this.user.baseStake) this.user.baseStake = 2.0;
     if (!this.user.targetProfit) this.user.targetProfit = 607; 
     
@@ -102,18 +111,32 @@ export class DerivBot {
     if (!this.user.market) this.user.market = 'R_100';
   }
 
+  // METHOD: Force stop the bot
+  stop() {
+    this.user.isRunning = false;
+    console.log(`[${this.user.userId}] Bot manually stopped.`);
+  }
+
+  // METHOD: Restart bot and reset all session stats to zero
+  start(newLimit = 0) {
+    this.user.tradesToday = 0;
+    this.user.totalProfit = 0;
+    this.user.currentMultiplier = 1; // Resets Martingale
+    this.user.tradeLimit = newLimit;
+    this.user.isRunning = true;
+    console.log(`[${this.user.userId}] Bot Reset & Started with limit: ${newLimit}`);
+  }
+
   connect() {
     const appId = process.env.DERIV_APP_ID || 1089;
     this.user.ws = new WebSocket(DERIV_WS(appId));
     this.user.ws.on('open', () => { 
-        console.log(`[${this.user.userId}] Connection Active`); 
         this.authorize(); 
     });
     this.user.ws.on('message', msg => {
       try {
         const data = JSON.parse(msg);
         if (data.error) {
-          console.error(`[${this.user.userId}] API Error:`, data.error.message);
           if (data.msg_type === 'buy') this.accBot.inTrade = false;
           return;
         }
@@ -122,7 +145,9 @@ export class DerivBot {
     });
     this.user.ws.on('close', () => { 
         this.user.active = false; 
-        setTimeout(() => this.connect(), 5000); 
+        if (this.user.isRunning) {
+            setTimeout(() => this.connect(), 5000); 
+        }
     });
   }
 
@@ -147,7 +172,6 @@ export class DerivBot {
       case 'proposal_open_contract':
         const contract = data.proposal_open_contract;
         if (contract.is_sold) {
-          // Send result to monitor for pause/trend logic
           this.digitMonitor.onResult(contract.profit >= 0 ? 'win' : 'loss');
           this.accBot.handleContractUpdate(contract);
           if (data.subscription) this.user.ws.send(JSON.stringify({ forget: data.subscription.id }));
@@ -157,10 +181,9 @@ export class DerivBot {
   }
 
   handleTick(tick) {
-    if (!tick?.quote) return;
+    if (!tick?.quote || !this.user.isRunning) return;
     this.digitMonitor.add(tick.quote);
     
-    // The strategy now decides based on the "Over 5" logic
     const prediction = decideFromMonitor(this.digitMonitor);
     
     if (prediction !== null) {
