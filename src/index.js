@@ -250,40 +250,11 @@ app.listen(PORT, async () => {
   console.log(`🌐 Server Running: Port ${PORT}`);
 
   try {
-    // 1. Ensure Table has necessary columns
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        user_id TEXT PRIMARY KEY,
-        api_token TEXT,
-        app_id TEXT,
-        ws_url TEXT,
-        total_profit NUMERIC DEFAULT 0,
-        trades_today INTEGER DEFAULT 0,
-        current_multiplier NUMERIC DEFAULT 1,
-        active BOOLEAN DEFAULT true
-      )
-    `);
+    // 1. Force add columns if they are missing (Safety measure)
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS app_id TEXT`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS ws_url TEXT`);
 
-    // 2. AUTO-LOAD MAIN BOT FROM ENV
-    const mainToken = process.env.DERIV_API_TOKEN;
-    const mainAppId = process.env.DERIV_APP_ID;
-    const mainWsUrl = process.env.DERIV_WS_URL || 'wss://ws.derivws.com/websockets/v3';
-
-    if (mainToken) {
-      console.log("🔍 Checking for Primary Bot in DB...");
-      const checkAdmin = await pool.query("SELECT * FROM users WHERE user_id = $1", ['Primary_Bot']);
-      
-      if (checkAdmin.rows.length === 0) {
-        console.log("📝 Auto-registering Primary Bot from Render Environments...");
-        await pool.query(
-          `INSERT INTO users (user_id, api_token, app_id, ws_url, active, total_profit, trades_today, current_multiplier) 
-           VALUES ($1, $2, $3, $4, true, 0, 0, 1)`,
-          ['Primary_Bot', mainToken, mainAppId, mainWsUrl]
-        );
-      }
-    }
-
-    // 3. Load all active users
+    // 2. Load all active users
     const result = await pool.query("SELECT * FROM users WHERE active = true");
     console.log(`📦 Database loaded. Booting ${result.rows.length} bot(s)...`);
     
@@ -291,20 +262,32 @@ app.listen(PORT, async () => {
       bootBot({
         userId: u.user_id,
         apiToken: u.api_token,
-        appId: u.app_id || process.env.DERIV_APP_ID, // Fallback to env if not in DB
-        wsUrl: u.ws_url || process.env.DERIV_WS_URL,
+        appId: u.app_id || process.env.DERIV_APP_ID,
+        wsUrl: u.ws_url || process.env.DERIV_WS_URL || 'wss://ws.derivws.com/websockets/v3',
         totalProfit: Number(u.total_profit),
         tradesToday: u.trades_today,
         currentMultiplier: Number(u.current_multiplier)
       });
     });
+
+    // 3. Register Primary Bot if missing
+    const mainToken = process.env.DERIV_API_TOKEN;
+    if (mainToken && !result.rows.find(u => u.user_id === 'Primary_Bot')) {
+        console.log("📝 Registering Primary Bot...");
+        await pool.query(
+          `INSERT INTO users (user_id, api_token, app_id, ws_url, active) 
+           VALUES ($1, $2, $3, $4, true) ON CONFLICT DO NOTHING`,
+          ['Primary_Bot', mainToken, process.env.DERIV_APP_ID, process.env.DERIV_WS_URL]
+        );
+        // Boot it manually if it wasn't in the initial result
+        bootBot({ userId: 'Primary_Bot', apiToken: mainToken });
+    }
+
   } catch (e) {
     console.error("DB Startup Error:", e.message);
   }
 
-  if (!global.telegramStarted) {
-    global.telegramStarted = true;
-    listenTelegramAdmin(bots);
-  }
+  // ... Telegram listener logic ...
 });
+
 
