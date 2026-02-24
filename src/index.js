@@ -250,11 +250,13 @@ app.listen(PORT, async () => {
   console.log(`🌐 Server Running: Port ${PORT}`);
 
   try {
-    // 1. Create Table if not exists
+    // 1. Ensure Table has necessary columns
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         user_id TEXT PRIMARY KEY,
         api_token TEXT,
+        app_id TEXT,
+        ws_url TEXT,
         total_profit NUMERIC DEFAULT 0,
         trades_today INTEGER DEFAULT 0,
         current_multiplier NUMERIC DEFAULT 1,
@@ -262,15 +264,38 @@ app.listen(PORT, async () => {
       )
     `);
 
-    // 2. Load users from Supabase
+    // 2. AUTO-LOAD MAIN BOT FROM ENV
+    const mainToken = process.env.DERIV_API_TOKEN;
+    const mainAppId = process.env.DERIV_APP_ID;
+    const mainWsUrl = process.env.DERIV_WS_URL || 'wss://ws.derivws.com/websockets/v3';
+
+    if (mainToken) {
+      console.log("🔍 Checking for Primary Bot in DB...");
+      const checkAdmin = await pool.query("SELECT * FROM users WHERE user_id = $1", ['Primary_Bot']);
+      
+      if (checkAdmin.rows.length === 0) {
+        console.log("📝 Auto-registering Primary Bot from Render Environments...");
+        await pool.query(
+          `INSERT INTO users (user_id, api_token, app_id, ws_url, active, total_profit, trades_today, current_multiplier) 
+           VALUES ($1, $2, $3, $4, true, 0, 0, 1)`,
+          ['Primary_Bot', mainToken, mainAppId, mainWsUrl]
+        );
+      }
+    }
+
+    // 3. Load all active users
     const result = await pool.query("SELECT * FROM users WHERE active = true");
+    console.log(`📦 Database loaded. Booting ${result.rows.length} bot(s)...`);
+    
     result.rows.forEach(u => {
       bootBot({
         userId: u.user_id,
         apiToken: u.api_token,
-        totalProfit: u.total_profit,
+        appId: u.app_id || process.env.DERIV_APP_ID, // Fallback to env if not in DB
+        wsUrl: u.ws_url || process.env.DERIV_WS_URL,
+        totalProfit: Number(u.total_profit),
         tradesToday: u.trades_today,
-        currentMultiplier: u.current_multiplier
+        currentMultiplier: Number(u.current_multiplier)
       });
     });
   } catch (e) {
@@ -282,3 +307,4 @@ app.listen(PORT, async () => {
     listenTelegramAdmin(bots);
   }
 });
+
