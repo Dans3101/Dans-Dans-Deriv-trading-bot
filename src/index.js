@@ -42,6 +42,7 @@ async function bootBot(userData) {
     ...userData,
     apiToken,
     totalProfit: Number(userData.totalProfit) || 0,
+    lifetimeProfit: Number(userData.lifetimeProfit) || 0, // NEW
     tradesToday: Number(userData.tradesToday) || 0,
     currentMultiplier: Number(userData.currentMultiplier) || 1,
     isRunning: userData.isRunning ?? true,
@@ -63,8 +64,8 @@ function generateUserStats(shortId) {
 
     if (!userData) return `<div style="color:#d91e18; padding:10px; font-weight:bold; text-align:center;">❌ No active bot found for ID ending in "${shortId}".</div>`;
 
-    const profit = Number(userData.user?.totalProfit || 0).toFixed(2);
-    const color = profit >= 0 ? "#27ae60" : "#e74c3c";
+    const sessionProfit = Number(userData.user?.totalProfit || 0).toFixed(2);
+    const lifetimeProfit = Number(userData.user?.lifetimeProfit || 0).toFixed(2);
     const isRunning = userData.user.isRunning;
 
     return `
@@ -77,16 +78,17 @@ function generateUserStats(shortId) {
             </div>
 
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:20px;">
-                <div><small style="color:#888;">Session Profit</small><br><b style="font-size:18px; color:${color};">$${profit}</b></div>
+                <div><small style="color:#888;">Session Profit</small><br><b style="font-size:18px; color:#27ae60;">$${sessionProfit}</b></div>
+                <div><small style="color:#888;">Lifetime Profit</small><br><b style="font-size:18px; color:#2c3e50;">$${lifetimeProfit}</b></div>
                 <div><small style="color:#888;">Trades Today</small><br><b style="font-size:18px;">${userData.user.tradesToday}</b></div>
+                <div><small style="color:#888;">Limit</small><br><b style="font-size:18px;">${userData.user.tradeLimit || '∞'}</b></div>
             </div>
 
             <form action="/user/set-limit" method="POST" style="margin-bottom:15px; border-top:1px solid #eee; padding-top:15px;">
                 <input type="hidden" name="trackId" value="${shortId}">
-                <label style="font-size:12px; font-weight:bold; color:#555;">Auto-Stop Trade Limit:</label>
                 <div style="display:flex; gap:5px; margin-top:5px;">
-                    <input type="number" name="limit" value="${userData.user.tradeLimit}" style="margin:0; padding:10px; flex-grow:1; border:1px solid #ddd; border-radius:8px;" placeholder="0 = No Limit">
-                    <button type="submit" style="background:#2c3e50; color:white; border:none; border-radius:8px; padding:0 15px; cursor:pointer; font-weight:bold;">Set</button>
+                    <input type="number" name="limit" value="${userData.user.tradeLimit}" style="margin:0; padding:10px; flex-grow:1; border:1px solid #ddd; border-radius:8px;" placeholder="Trade Limit">
+                    <button type="submit" style="background:#2c3e50; color:white; border:none; border-radius:8px; padding:0 15px; cursor:pointer;">Set Limit</button>
                 </div>
             </form>
 
@@ -94,7 +96,7 @@ function generateUserStats(shortId) {
                 ${isRunning ? 
                   `<form action="/user/stop" method="POST" style="flex:1;">
                     <input type="hidden" name="trackId" value="${shortId}">
-                    <button type="submit" style="background:#e67e22; color:white; border:none; padding:12px; border-radius:10px; cursor:pointer; font-weight:bold; width:100%;">Stop Trading</button>
+                    <button type="submit" style="background:#e67e22; color:white; border:none; padding:12px; border-radius:10px; cursor:pointer; font-weight:bold; width:100%;">Stop Bot</button>
                    </form>` : 
                   `<form action="/user/start" method="POST" style="flex:1;">
                     <input type="hidden" name="trackId" value="${shortId}">
@@ -102,20 +104,21 @@ function generateUserStats(shortId) {
                    </form>`
                 }
             </div>
-            <div style="text-align:center; margin-top:15px;"><a href="/" style="color:#999; font-size:12px; text-decoration:none;">← Close Dashboard</a></div>
         </div>`;
 }
 
 function generateStaffPerformanceTable() {
-  if (bots.size === 0) return '<tr><td colspan="5" style="text-align:center; padding:15px; color:#888;">No active sessions.</td></tr>';
+  if (bots.size === 0) return '<tr><td colspan="6" style="text-align:center; padding:15px; color:#888;">No active sessions.</td></tr>';
   let rows = "";
   bots.forEach((bot, id) => {
-    const profit = Number(bot.user?.totalProfit || 0).toFixed(2);
+    const sProfit = Number(bot.user?.totalProfit || 0).toFixed(2);
+    const lProfit = Number(bot.user?.lifetimeProfit || 0).toFixed(2);
     rows += `<tr>
         <td><b>${id}</b></td>
         <td>$${Number(bot.user?.currentBalance || 0).toFixed(2)}</td>
-        <td style="color:${profit >= 0 ? '#27ae60' : '#e74c3c'}; font-weight:bold;">$${profit}</td>
-        <td>${bot.user.isRunning ? '🟢 Running' : '🟠 Paused'}</td>
+        <td style="color:#27ae60;">$${sProfit}</td>
+        <td style="font-weight:bold;">$${lProfit}</td>
+        <td>${bot.user.isRunning ? '🟢 Live' : '🟠 Paused'}</td>
         <td><form action="/delete" method="POST" style="margin:0;"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit" style="background:#ff4757; color:white; border:none; border-radius:4px; cursor:pointer; padding:5px 10px;">Kill</button></form></td>
     </tr>`;
   });
@@ -162,6 +165,7 @@ app.post('/user/start', async (req, res) => {
     bots.forEach(async (bot, id) => { 
         if (id.endsWith(trackId)) { 
             bot.start(bot.user.tradeLimit);
+            // NOTE: We do NOT reset lifetime_profit here
             await pool.query("UPDATE users SET is_running = true, total_profit = 0, trades_today = 0, current_multiplier = 1 WHERE user_id = $1", [id]);
         } 
     });
@@ -198,7 +202,7 @@ app.post('/admin-portal', (req, res) => {
         <h1>🛡️ Staff Dashboard</h1>
         <div style="display:grid; grid-template-columns: 1fr 2fr; gap:25px;">
           <div><h3>Pending</h3><table border="1" width="100%">${pendingRows || '<tr><td>None</td></tr>'}</table></div>
-          <div><h3>Live Performance</h3><table border="1" width="100%">${generateStaffPerformanceTable()}</table></div>
+          <div><h3>Performance</h3><table border="1" width="100%" cellpadding="10"><thead><tr style="background:#eee;"><th>ID</th><th>Balance</th><th>Session</th><th>Lifetime</th><th>Status</th><th>Actions</th></tr></thead><tbody>${generateStaffPerformanceTable()}</tbody></table></div>
         </div>
       </div>
     </body>`);
@@ -210,10 +214,10 @@ app.post('/manual-activate', async (req, res) => {
     const data = pendingUsers.get(userId);
     try {
       await pool.query(
-        `INSERT INTO users (user_id, api_token, active, total_profit, trades_today, current_multiplier, is_running, trade_limit) 
-         VALUES ($1, $2, true, 0, 0, 1, true, 0) ON CONFLICT (user_id) DO UPDATE SET active = true`, [userId, data.apiToken]
+        `INSERT INTO users (user_id, api_token, active, total_profit, lifetime_profit, trades_today, current_multiplier, is_running, trade_limit) 
+         VALUES ($1, $2, true, 0, 0, 0, 1, true, 0) ON CONFLICT (user_id) DO UPDATE SET active = true`, [userId, data.apiToken]
       );
-      await bootBot({ userId, apiToken: data.apiToken, isRunning: true, tradeLimit: 0 });
+      await bootBot({ userId, apiToken: data.apiToken, isRunning: true, tradeLimit: 0, lifetimeProfit: 0 });
       pendingUsers.delete(userId);
       res.redirect(307, '/admin-portal');
     } catch (e) { res.status(500).send("DB Error: " + e.message); }
@@ -235,12 +239,12 @@ app.post('/delete', async (req, res) => {
 app.listen(PORT, async () => {
   console.log(`🌐 Server Running: Port ${PORT}`);
   try {
-    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_running BOOLEAN DEFAULT true`);
-    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS trade_limit INTEGER DEFAULT 0`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS lifetime_profit NUMERIC DEFAULT 0`);
     const result = await pool.query("SELECT * FROM users WHERE active = true");
     result.rows.forEach(u => {
       bootBot({
         userId: u.user_id, apiToken: u.api_token, totalProfit: u.total_profit,
+        lifetimeProfit: u.lifetime_profit, // NEW
         tradesToday: u.trades_today, currentMultiplier: u.current_multiplier,
         isRunning: u.is_running, tradeLimit: u.trade_limit
       });
