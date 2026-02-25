@@ -65,6 +65,8 @@ function generateUserStats(shortId) {
 
     const sessionProfit = Number(userData.user?.totalProfit || 0).toFixed(2);
     const lifetimeProfit = Number(userData.user?.lifetimeProfit || 0).toFixed(2);
+    // Added retrieval of current balance
+    const currentBalance = Number(userData.user?.currentBalance || 0).toFixed(2); 
     const isRunning = userData.user.isRunning;
 
     return `
@@ -76,11 +78,15 @@ function generateUserStats(shortId) {
                 </span>
             </div>
 
-            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:20px;">
-                <div><small style="color:#888;">Session Profit</small><br><b style="font-size:18px; color:#27ae60;">$${sessionProfit}</b></div>
-                <div><small style="color:#888;">Lifetime Profit</small><br><b style="font-size:18px; color:#2c3e50;">$${lifetimeProfit}</b></div>
-                <div><small style="color:#888;">Trades Today</small><br><b style="font-size:18px;">${userData.user.tradesToday}</b></div>
-                <div><small style="color:#888;">Limit</small><br><b style="font-size:18px;">${userData.user.tradeLimit || '∞'}</b></div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; margin-bottom:20px;">
+                <div><small style="color:#888;">Balance</small><br><b style="font-size:16px; color:#2c3e50;">$${currentBalance}</b></div>
+                <div><small style="color:#888;">Session</small><br><b style="font-size:16px; color:#27ae60;">$${sessionProfit}</b></div>
+                <div><small style="color:#888;">Lifetime</small><br><b style="font-size:16px; color:#2c3e50;">$${lifetimeProfit}</b></div>
+            </div>
+            
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:20px; border-top: 1px solid #eee; padding-top: 10px;">
+                <div><small style="color:#888;">Trades Today</small><br><b style="font-size:16px;">${userData.user.tradesToday}</b></div>
+                <div><small style="color:#888;">Trade Limit</small><br><b style="font-size:16px;">${userData.user.tradeLimit || '∞'}</b></div>
             </div>
 
             <form action="/user/set-limit" method="POST" style="margin-bottom:15px; border-top:1px solid #eee; padding-top:15px;">
