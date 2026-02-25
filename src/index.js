@@ -42,7 +42,7 @@ async function bootBot(userData) {
     ...userData,
     apiToken,
     totalProfit: Number(userData.totalProfit) || 0,
-    lifetimeProfit: Number(userData.lifetimeProfit) || 0, // NEW
+    lifetimeProfit: Number(userData.lifetimeProfit) || 0,
     tradesToday: Number(userData.tradesToday) || 0,
     currentMultiplier: Number(userData.currentMultiplier) || 1,
     isRunning: userData.isRunning ?? true,
@@ -104,6 +104,7 @@ function generateUserStats(shortId) {
                    </form>`
                 }
             </div>
+            <div style="text-align:center; margin-top:10px;"><a href="/" style="color:#999; font-size:11px; text-decoration:none;">Refresh / Close</a></div>
         </div>`;
 }
 
@@ -135,8 +136,8 @@ app.get('/', (req, res) => {
     </head><body><div class="hero"><h1>Dans-Dans Trading Bot</h1></div><div class="container">
     ${trackId ? `<div class="card" style="border: 2px solid var(--primary);">${generateUserStats(trackId)}</div>` : ''}
     <div class="card"><div style="background:#e8f5e9; color:#2e7d32; padding:5px 15px; border-radius:50px; display:inline-block; font-weight:bold; font-size:12px; margin-bottom:10px;">💰 ${SUB_PRICE} / Week</div>
-    <form action="/payment-page" method="POST"><input type="text" name="apiToken" placeholder="Paste Deriv API Token" required><button type="submit" class="btn-connect">Connect & Launch Bot</button></form><a href="${HELP_LINK}" class="help-btn" target="_blank">Chat Admin for Help</a></div>
-    <div class="card"><form action="/" method="GET"><input type="text" name="trackId" placeholder="Enter last 4 digits of ID" required><button type="submit" class="btn-track">Access My Control Panel</button></form></div>
+    <form action="/payment-page" method="POST"><input type="text" name="apiToken" placeholder="Paste Deriv API Token" required><button type="submit" class="btn-connect">Connect & Launch Bot</button></form><p style="font-size:11px; color:#888; margin-top:10px;">How to get token: Deriv Settings > API Token > Check "Read" & "Trade"</p><a href="${HELP_LINK}" class="help-btn" target="_blank">Chat Admin for Help</a></div>
+    <div class="card"><h3 style="margin-top:0;">Track My Bot Progress</h3><form action="/" method="GET"><input type="text" name="trackId" placeholder="Enter last 4 digits of ID (e.g. 001)" required><button type="submit" class="btn-track">View My Live Stats</button></form></div>
     <div style="text-align:center;"><a href="/admin-login" style="color:#ccc; text-decoration:none; font-size:11px;">Staff Portal</a></div></div></body></html>`);
 });
 
@@ -144,7 +145,23 @@ app.post('/payment-page', (req, res) => {
   const { apiToken } = req.body;
   const tempId = `User_${Math.floor(1000 + Math.random() * 9000)}`;
   pendingUsers.set(tempId, { apiToken });
-  res.send(`<div style="max-width:400px; margin: 60px auto; font-family: sans-serif; text-align:center; padding:30px; background:white; border-radius:20px; box-shadow:0 10px 30px rgba(0,0,0,0.1);"><h2>Payment Details</h2><p>Send <b>${SUB_PRICE}</b> to M-Pesa:</p><h1 style="color:#1a1a1a;">${PAYMENT_NUMBER}</h1><p>Your ID: <b>${tempId}</b></p><a href="${HELP_LINK}" style="display:block; background:#2c3e50; color:white; padding:18px; text-decoration:none; border-radius:12px; font-weight:bold; margin-top:20px;">✅ I Have Paid</a></div>`);
+  
+  res.send(`
+    <body style="font-family:sans-serif; background:#f4f7f6; display:flex; align-items:center; justify-content:center; height:100vh; margin:0;">
+      <div style="max-width:400px; width:90%; background:white; padding:30px; border-radius:20px; box-shadow:0 10px 30px rgba(0,0,0,0.1); text-align:center;">
+        <h2 style="color:#2c3e50;">Payment Details</h2>
+        <p>Send <b>${SUB_PRICE}</b> to M-Pesa:</p>
+        <h1 style="color:#1a1a1a; margin:15px 0;">${PAYMENT_NUMBER}</h1>
+        <p style="background:#f8f9fa; padding:10px; border-radius:8px; border:1px dashed #ccc;">Your ID: <b>${tempId}</b></p>
+        
+        <a href="${HELP_LINK}" style="display:block; background:#2c3e50; color:white; padding:16px; text-decoration:none; border-radius:12px; font-weight:bold; margin-top:20px;">✅ Pay if real account</a>
+        
+        <div style="margin:25px 0; border-top:1px solid #eee; padding-top:20px;">
+          <p style="font-size:13px; color:#777;">Using a virtual/demo account?</p>
+          <a href="/" style="display:block; background:#eee; color:#555; padding:12px; text-decoration:none; border-radius:10px; font-weight:bold;">⬅️ Go back if Demo account</a>
+        </div>
+      </div>
+    </body>`);
 });
 
 /* ================= USER CONTROL LOGIC ================= */
@@ -165,7 +182,6 @@ app.post('/user/start', async (req, res) => {
     bots.forEach(async (bot, id) => { 
         if (id.endsWith(trackId)) { 
             bot.start(bot.user.tradeLimit);
-            // NOTE: We do NOT reset lifetime_profit here
             await pool.query("UPDATE users SET is_running = true, total_profit = 0, trades_today = 0, current_multiplier = 1 WHERE user_id = $1", [id]);
         } 
     });
@@ -244,7 +260,7 @@ app.listen(PORT, async () => {
     result.rows.forEach(u => {
       bootBot({
         userId: u.user_id, apiToken: u.api_token, totalProfit: u.total_profit,
-        lifetimeProfit: u.lifetime_profit, // NEW
+        lifetimeProfit: u.lifetime_profit, 
         tradesToday: u.trades_today, currentMultiplier: u.current_multiplier,
         isRunning: u.is_running, tradeLimit: u.trade_limit
       });
