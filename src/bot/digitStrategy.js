@@ -57,3 +57,68 @@ export function decideFromMonitor(monitor) {
 
   return null;
 }
+/**
+ * digitStrategy.js
+ * * This strategy implements the exact logic from the provided XML.
+ * Logic:
+ * 1. Uses a specific list of predictions: [0, 4, 5, 6, 7, 8].
+ * 2. Increments the prediction index sequentially for every trade.
+ * 3. Resets the prediction index to 0 only upon a Win.
+ * 4. No loss multiplier (Martingale) is included as per the source XML.
+ */
+
+export const digitStrategy = {
+    name: "AI BOT XML Strategy",
+
+    // Exact list of predictions from the XML initialization block
+    predictionList: [0, 4, 5, 6, 7, 8],
+
+    /**
+     * Determines the parameters for the next trade.
+     * Compatible with the DerivBot purchase cycle.
+     */
+    getNextTrade: (user) => {
+        // Initialize the tracking index if it's the first run
+        if (user.predictionIndex === undefined) {
+            user.predictionIndex = 0;
+        }
+
+        // Get the current prediction from the list
+        const currentPrediction = digitStrategy.predictionList[user.predictionIndex];
+
+        return {
+            symbol: '1HZ100V',           // Volatility 100 (1s) Index
+            duration: 1,                 // 1 Tick
+            duration_unit: 't',
+            basis: 'stake',
+            amount: Number(user.currentStake) || 4, // Default stake is 4
+            prediction: currentPrediction,
+            contract_type: 'DIGITOVER'    // Based on purchase list in XML
+        };
+    },
+
+    /**
+     * Processes the result of the last contract to update the user session.
+     * Compatible with the after_purchase logic in the XML.
+     */
+    processResult: (user, lastContract) => {
+        const isWin = lastContract.status === 'won';
+
+        if (isWin) {
+            // Reset to the start of the prediction list on a win
+            user.predictionIndex = 0;
+            // Ensure stake returns to base (no multiplier in XML, so it stays constant)
+            user.currentStake = user.baseStake || 4;
+        } else {
+            // Move to the next prediction in the list upon a loss
+            user.predictionIndex++;
+
+            // If we reach the end of the list, loop back to the first prediction (index 0)
+            if (user.predictionIndex >= digitStrategy.predictionList.length) {
+                user.predictionIndex = 0;
+            }
+            
+            // Note: No Martingale multiplier is applied here as it was not in the XML.
+        }
+    }
+};
