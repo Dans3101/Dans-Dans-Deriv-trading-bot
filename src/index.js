@@ -59,8 +59,7 @@ async function bootBot(userData) {
 
 function generateUserStats(shortId) {
     let userData = null;
-    let fullId = null;
-    bots.forEach((bot, id) => { if (id.endsWith(shortId)) { userData = bot; fullId = id; } });
+    bots.forEach((bot, id) => { if (id.endsWith(shortId)) { userData = bot; } });
 
     if (!userData) return `<div style="color:#d91e18; padding:10px; font-weight:bold; text-align:center;">❌ No active bot found for ID ending in "${shortId}".</div>`;
 
@@ -114,12 +113,13 @@ function generateStaffPerformanceTable() {
   bots.forEach((bot, id) => {
     const sProfit = Number(bot.user?.totalProfit || 0).toFixed(2);
     const lProfit = Number(bot.user?.lifetimeProfit || 0).toFixed(2);
+    const sColor = sProfit >= 0 ? '#27ae60' : '#d91e18';
     rows += `<tr>
         <td><b>${id}</b></td>
         <td>$${Number(bot.user?.currentBalance || 0).toFixed(2)}</td>
-        <td style="color:#27ae60;">$${sProfit}</td>
+        <td style="color:${sColor};">$${sProfit}</td>
         <td style="font-weight:bold;">$${lProfit}</td>
-        <td>${bot.user.isRunning ? '🟢 Live' : '🟠 Paused'}</td>
+        <td>${bot.user.isRunning ? '<span style="color:#27ae60;">● Live</span>' : '<span style="color:#e67e22;">○ Paused</span>'}</td>
         <td><form action="/delete" method="POST" style="margin:0;"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit" style="background:#ff4757; color:white; border:none; border-radius:4px; cursor:pointer; padding:5px 10px;">Kill</button></form></td>
     </tr>`;
   });
@@ -210,15 +210,36 @@ app.post('/admin-portal', (req, res) => {
   if (password !== ADMIN_PASSWORD) return res.send("Denied.");
   let pendingRows = "";
   pendingUsers.forEach((data, id) => {
-    pendingRows += `<tr><td>${id}</td><td><form action="/manual-activate" method="POST"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit">Approve</button></form></td></tr>`;
+    pendingRows += `<tr><td>${id}</td><td><form action="/manual-activate" method="POST"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit" style="background:#27ae60; color:white; border:none; padding:5px 10px; border-radius:4px; cursor:pointer;">Approve</button></form></td></tr>`;
   });
   res.send(`
     <body style="font-family:sans-serif; padding:20px; background:#f4f7f6;">
       <div style="max-width:1100px; margin:auto; background:white; padding:25px; border-radius:15px; box-shadow:0 4px 12px rgba(0,0,0,0.1);">
-        <h1>🛡️ Staff Dashboard</h1>
-        <div style="display:grid; grid-template-columns: 1fr 2fr; gap:25px;">
-          <div><h3>Pending</h3><table border="1" width="100%">${pendingRows || '<tr><td>None</td></tr>'}</table></div>
-          <div><h3>Performance</h3><table border="1" width="100%" cellpadding="10"><thead><tr style="background:#eee;"><th>ID</th><th>Balance</th><th>Session</th><th>Lifetime</th><th>Status</th><th>Actions</th></tr></thead><tbody>${generateStaffPerformanceTable()}</tbody></table></div>
+        
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; border-bottom:2px solid #eee; padding-bottom:15px;">
+            <h1 style="margin:0;">🛡️ Staff Dashboard</h1>
+            <a href="/" style="background:#2c3e50; color:white; text-decoration:none; padding:10px 20px; border-radius:8px; font-weight:bold; font-size:14px;">🚪 Exit Dashboard</a>
+        </div>
+
+        <div style="display:grid; grid-template-columns: 1fr 3.5fr; gap:25px;">
+          <div>
+            <h3>Pending</h3>
+            <table border="1" width="100%" style="border-collapse:collapse; border:1px solid #ddd;">
+                <tr style="background:#eee;"><th>ID</th><th>Action</th></tr>
+                ${pendingRows || '<tr><td colspan="2" style="text-align:center; padding:10px;">None</td></tr>'}
+            </table>
+          </div>
+          <div>
+            <h3>Performance</h3>
+            <table border="1" width="100%" cellpadding="10" style="border-collapse:collapse; border:1px solid #ddd;">
+                <thead>
+                    <tr style="background:#eee;"><th>ID</th><th>Balance</th><th>Session</th><th>Lifetime</th><th>Status</th><th>Actions</th></tr>
+                </thead>
+                <tbody>
+                    ${generateStaffPerformanceTable()}
+                </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </body>`);
