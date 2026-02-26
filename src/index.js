@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'fs';
 import { Pool } from 'pg';
 import { DerivBot } from './bot/DerivBot.js';
 import { listenTelegramAdmin } from './notifications/telegramAdmin.js';
@@ -10,7 +11,6 @@ const PORT = process.env.PORT || 3000;
 /* ================= CONFIGURATION ================= */
 const APP_ID = process.env.DERIV_APP_ID || "129457";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
-
 const BASE_URL = "https://dans-dans-deriv-trading-bot.onrender.com";
 const REDIRECT_URI = `${BASE_URL}/callback`;
 
@@ -24,13 +24,23 @@ app.use(express.json());
 
 export const bots = new Map();
 
-/* ================= BOT LOGIC ================= */
+/* ================= BOT BOOT LOGIC ================= */
 async function bootBot(userData) {
   if (bots.has(userData.userId)) return;
 
   try {
     const session = { ...userData, totalProfit: 0, isRunning: false };
     const bot = new DerivBot(session);
+
+    // — LOAD XML STRATEGY —
+    const xmlPath = './src/bot/xml'; // adjust to your actual XML file path
+    if (fs.existsSync(xmlPath)) {
+      const xmlContent = fs.readFileSync(xmlPath, 'utf8');
+      bot.loadXML(xmlContent);
+    } else {
+      console.warn("XML bot file not found at:", xmlPath);
+    }
+
     bots.set(userData.userId, bot);
     console.log(`✅ Bot instance ready for ${userData.userId}`);
   } catch (e) {
@@ -41,9 +51,9 @@ async function bootBot(userData) {
 function startBot(userId) {
   const bot = bots.get(userId);
   if (!bot) return false;
-  if (!bot.isRunning) {
+  if (!bot.user.isRunning) {
+    bot.user.isRunning = true;
     bot.connect();
-    bot.isRunning = true;
     console.log(`🚀 Bot started for ${userId}`);
     return true;
   }
@@ -53,17 +63,14 @@ function startBot(userId) {
 function stopBot(userId) {
   const bot = bots.get(userId);
   if (!bot) return false;
-  if (bot.isRunning) {
-    bot.disconnect?.();
-    bot.isRunning = false;
-    console.log(`🛑 Bot stopped for ${userId}`);
+  if (bot.user.isRunning) {
+    bot.stop();
     return true;
   }
   return false;
 }
 
 /* ================= FRONTEND ================= */
-
 app.get('/', (req, res) => {
   const { token, acct } = req.query;
   const authUrl = `https://oauth.deriv.com/oauth2/authorize?app_id=${APP_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
@@ -87,12 +94,21 @@ app.get('/', (req, res) => {
     </style>
     <script>
       async function runBot() {
-        const res = await fetch('/start-bot', { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ token:'${token}' }) });
+        const res = await fetch('/start-bot', {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body:JSON.stringify({ token:'${token}' })
+        });
         const data = await res.json();
         document.getElementById('bot-status').innerText = data.success ? 'Bot Running 🚀' : 'Failed to start';
       }
+
       async function stopBotFunc() {
-        const res = await fetch('/stop-bot', { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ token:'${token}' }) });
+        const res = await fetch('/stop-bot', {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body:JSON.stringify({ token:'${token}' })
+        });
         const data = await res.json();
         document.getElementById('bot-status').innerText = data.success ? 'Bot Stopped 🛑' : 'Failed to stop';
       }
@@ -120,14 +136,12 @@ app.get('/', (req, res) => {
         </div>
       `}
     </div>
-
   </body>
   </html>
   `);
 });
 
 /* ================= CALLBACK ================= */
-
 app.get('/callback', async (req, res) => {
   const { acct1, token1 } = req.query;
   if (!token1) return res.send("<h2>Connection Failed</h2><p>No token received.</p><a href='/'>Go Back</a>");
@@ -153,7 +167,6 @@ app.get('/callback', async (req, res) => {
 });
 
 /* ================= BOT CONTROL ROUTES ================= */
-
 app.post('/start-bot', async (req, res) => {
   const { token } = req.body;
   try {
@@ -175,7 +188,6 @@ app.post('/stop-bot', async (req, res) => {
 });
 
 /* ================= ADMIN ================= */
-
 app.get('/admin-login', (req, res) => {
   res.send(`
     <body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;">
@@ -194,7 +206,6 @@ app.post('/admin-portal', (req, res) => {
 });
 
 /* ================= SERVER START ================= */
-
 app.listen(PORT, async () => {
   console.log(`🌐 Server running on port ${PORT}`);
   try {
