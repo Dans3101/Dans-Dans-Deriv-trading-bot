@@ -3,9 +3,6 @@ import express from 'express';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import pg from 'pg'; 
-import multer from 'multer'; // New: for file uploads
-import fs from 'fs';
-import { UserSession } from './users/userSession.js';
 import { DerivBot } from './bot/DerivBot.js';
 import { listenTelegramAdmin } from './notifications/telegramAdmin.js';
 
@@ -14,20 +11,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const upload = multer({ dest: 'uploads/' }); // Temporary storage for XMLs
 const PORT = process.env.PORT || 3000;
 
-/* ================= DATABASE CONFIG ================= */
+/* ================= CONFIGURATION ================= */
+const APP_ID = "129457"; // Your Registered App ID
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
+const MARKUP_PERCENT = 0.001; // Your 0.1% Markup
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
-
-/* ================= CONFIGURATION ================= */
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
-const PAYMENT_NUMBER = "0713811622"; 
-const HELP_LINK = "https://wa.me/message/WW67ZG52UQHOO1"; 
-const SUB_PRICE = "100 KSH";
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -35,163 +29,172 @@ app.use(express.json());
 export const bots = new Map(); 
 const pendingUsers = new Map(); 
 
+// Global tracker for your markup earnings
+let totalVolumeTraded = 0; 
+
 /* ================= BOT BOOT LOGIC ================= */
 async function bootBot(userData) {
   if (bots.has(userData.userId)) return;
-  const apiToken = userData.apiToken?.startsWith('ENV:') ? process.env[userData.apiToken.replace('ENV:', '')] : userData.apiToken;
-  if (!apiToken) return;
 
   const session = {
     ...userData,
-    apiToken,
     totalProfit: Number(userData.totalProfit) || 0,
     lifetimeProfit: Number(userData.lifetimeProfit) || 0,
-    tradesToday: Number(userData.tradesToday) || 0,
-    currentMultiplier: Number(userData.currentMultiplier) || 1,
     isRunning: userData.isRunning ?? true,
-    tradeLimit: Number(userData.tradeLimit) || 0
   };
 
   const bot = new DerivBot(session);
+  
+  // Custom hook to track every stake placed for commission calculation
+  bot.onTradeExecuted = (stakeAmount) => {
+    totalVolumeTraded += Number(stakeAmount);
+  };
+
   bot.connect();
   bots.set(userData.userId, bot);
-  console.log(`🚀 Bot Instance Active: ${userData.userId}`);
+  console.log(`🚀 AI Bot Active for: ${userData.userId}`);
 }
 
 /* ================= UI GENERATORS ================= */
 
-function generateUserStats(shortId) {
-    let userData = null;
-    bots.forEach((bot, id) => { if (id.endsWith(shortId)) { userData = bot; } });
-
-    if (!userData) return `<div style="color:#d91e18; padding:10px; font-weight:bold; text-align:center;">❌ No active bot found for ID ending in "${shortId}".</div>`;
-
-    const sessionProfit = Number(userData.user?.totalProfit || 0).toFixed(2);
-    const lifetimeProfit = Number(userData.user?.lifetimeProfit || 0).toFixed(2);
-    const currentBalance = Number(userData.user?.currentBalance || 0).toFixed(2); 
-    const isRunning = userData.user.isRunning;
-
-    return `
-        <div style="background:#f8f9fa; border-radius:12px; padding:20px; text-align:left; border:1px solid #eee;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
-                <h4 style="margin:0; color:#2c3e50;">ID: ...${shortId}</h4>
-                <span style="background:${isRunning ? '#e8f5e9' : '#fff3e0'}; color:${isRunning ? '#2e7d32' : '#e67e22'}; padding:4px 10px; border-radius:50px; font-size:11px; font-weight:bold;">
-                    ${isRunning ? '● RUNNING' : '○ STOPPED'}
-                </span>
-            </div>
-            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; margin-bottom:20px;">
-                <div><small style="color:#888;">Balance</small><br><b style="font-size:16px; color:#2c3e50;">$${currentBalance}</b></div>
-                <div><small style="color:#888;">Session</small><br><b style="font-size:16px; color:#27ae60;">$${sessionProfit}</b></div>
-                <div><small style="color:#888;">Lifetime</small><br><b style="font-size:16px; color:#2c3e50;">$${lifetimeProfit}</b></div>
-            </div>
-            <div style="display:flex; gap:10px;">
-                ${isRunning ? 
-                  `<form action="/user/stop" method="POST" style="flex:1;"><input type="hidden" name="trackId" value="${shortId}"><button type="submit" style="background:#e67e22; color:white; border:none; padding:12px; border-radius:10px; width:100%;">Stop Bot</button></form>` : 
-                  `<form action="/user/start" method="POST" style="flex:1;"><input type="hidden" name="trackId" value="${shortId}"><button type="submit" style="background:#27ae60; color:white; border:none; padding:12px; border-radius:10px; width:100%;">Start</button></form>`
-                }
-            </div>
-            <div style="text-align:center; margin-top:10px;"><a href="/" style="color:#999; font-size:11px; text-decoration:none;">Close</a></div>
-        </div>`;
-}
-
-function generateStaffPerformanceTable() {
-  if (bots.size === 0) return '<tr><td colspan="6" style="text-align:center; padding:15px; color:#888;">No active sessions.</td></tr>';
+function generateStaffDashboard() {
+  const totalCommission = (totalVolumeTraded * MARKUP_PERCENT).toFixed(2);
   let rows = "";
+  
   bots.forEach((bot, id) => {
-    const sProfit = Number(bot.user?.totalProfit || 0).toFixed(2);
-    const lProfit = Number(bot.user?.lifetimeProfit || 0).toFixed(2);
-    const sColor = sProfit >= 0 ? '#27ae60' : '#d91e18';
+    const profit = Number(bot.user?.totalProfit || 0).toFixed(2);
     rows += `<tr>
         <td><b>${id}</b></td>
         <td>$${Number(bot.user?.currentBalance || 0).toFixed(2)}</td>
-        <td style="color:${sColor};">$${sProfit}</td>
-        <td style="font-weight:bold;">$${lProfit}</td>
-        <td>${bot.user.isRunning ? '🟢 Live' : '🟠 Paused'}</td>
-        <td><form action="/delete" method="POST" style="margin:0;"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit" style="background:#ff4757; color:white; border:none; border-radius:4px; padding:5px 10px;">Kill</button></form></td>
+        <td style="color:${profit >= 0 ? '#27ae60' : '#d91e18'};">$${profit}</td>
+        <td>${bot.user.isRunning ? '🟢 Active' : '🟠 Paused'}</td>
+        <td>
+          <form action="/delete" method="POST" style="margin:0;">
+            <input type="hidden" name="userId" value="${id}">
+            <input type="hidden" name="password" value="${ADMIN_PASSWORD}">
+            <button type="submit" style="background:#ff4757; color:white; border:none; padding:5px; border-radius:4px; cursor:pointer;">Kill</button>
+          </form>
+        </td>
     </tr>`;
   });
-  return rows;
+
+  return `
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; margin-bottom:25px;">
+        <div style="background:#e3f2fd; padding:20px; border-radius:15px; border:1px solid #bbdefb; text-align:center;">
+            <small style="color:#546e7a; font-weight:bold;">TOTAL VOLUME</small><br>
+            <b style="font-size:28px; color:#1565c0;">$${totalVolumeTraded.toFixed(2)}</b>
+        </div>
+        <div style="background:#e8f5e9; padding:20px; border-radius:15px; border:1px solid #c8e6c9; text-align:center;">
+            <small style="color:#2e7d32; font-weight:bold;">YOUR COMMISSION (0.1%)</small><br>
+            <b style="font-size:28px; color:#2e7d32;">$${totalCommission}</b>
+        </div>
+    </div>
+    <table border="1" width="100%" cellpadding="10" style="border-collapse:collapse; background:white;">
+        <thead><tr style="background:#f1f1f1;"><th>User</th><th>Balance</th><th>Profit</th><th>Status</th><th>Action</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5" style="text-align:center;">No active sessions</td></tr>'}</tbody>
+    </table>`;
 }
 
 /* ================= WEB ROUTES ================= */
 
 app.get('/', (req, res) => {
-  const trackId = req.query.trackId;
-  const DERIV_LINK = "https://app.deriv.com/account/api-token";
+  // Direct OAuth2 Link using your App ID
+  const authUrl = `https://oauth.deriv.com/oauth2/authorize?app_id=${APP_ID}&l=EN&brand=deriv`;
 
   res.send(`
-    <!DOCTYPE html><html><head><title>Dans-Dans Trading</title><meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>:root { --primary: #d91e18; --dark: #2c3e50; }body { font-family: 'Segoe UI', sans-serif; background: #f4f7f6; margin: 0; }.hero { background: var(--dark); color: white; padding: 40px 20px; text-align: center; }.container { max-width: 500px; margin: -40px auto 40px; padding: 0 15px; }.card { background: white; border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.1); padding: 30px; text-align:center; margin-bottom:20px;}input { width: 100%; padding: 14px; border: 2px solid #eee; border-radius: 12px; box-sizing: border-box; margin: 10px 0; outline:none; }.btn-connect { background: var(--primary); color: white; border: none; padding: 18px; border-radius: 12px; cursor: pointer; font-weight: bold; width: 100%; font-size: 16px; }.btn-track { background: var(--dark); color: white; border: none; padding: 12px; border-radius: 10px; cursor: pointer; font-weight: bold; width: 100%; }</style>
-    </head><body><div class="hero"><h1>Dans-Dans Trading Bot</h1></div><div class="container">
-    
-    ${trackId ? `<div class="card">${generateUserStats(trackId)}</div>` : ''}
-
-    <div class="card">
-        <h3 style="margin:0;">Connect & Launch</h3>
-        <p style="font-size:12px; color:#666;">Step 1: Get your token from Deriv</p>
-        <a href="${DERIV_LINK}" target="_blank" style="display:block; background:#eee; color:#333; text-decoration:none; padding:12px; border-radius:10px; font-weight:bold; margin-bottom:15px; border:1px solid #ccc;">🔑 Click to open Deriv Settings</a>
-        
-        <form action="/payment-page" method="POST">
-            <input type="text" name="apiToken" placeholder="Paste API Token here" required>
-            <p style="font-size:11px; color:#888; margin-bottom:10px;">Step 2: Upload your strategy file (Optional)</p>
-            <input type="file" name="strategyFile" accept=".xml" style="font-size:11px;">
-            <button type="submit" class="btn-connect">Launch Bot</button>
-        </form>
-    </div>
-
-    <div class="card">
-        <h3 style="margin-top:0;">Track Progress</h3>
-        <form action="/" method="GET"><input type="text" name="trackId" placeholder="Last 4 digits of ID" required><button type="submit" class="btn-track">View Stats</button></form>
-    </div>
-
-    <div style="text-align:center;"><a href="/admin-login" style="color:#ccc; text-decoration:none; font-size:11px;">Staff Portal</a></div>
+    <!DOCTYPE html><html><head><title>Dans-Dans AI Bot</title><meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      :root { --primary: #d91e18; --dark: #2c3e50; --success: #27ae60; }
+      body { font-family: 'Segoe UI', sans-serif; background: #f4f7f6; margin: 0; }
+      .hero { background: var(--dark); color: white; padding: 50px 20px; text-align: center; }
+      .container { max-width: 450px; margin: -50px auto 40px; padding: 0 15px; }
+      .card { background: white; border-radius: 25px; box-shadow: 0 15px 35px rgba(0,0,0,0.1); padding: 35px; text-align:center; }
+      .btn-connect { background: var(--primary); color: white; border: none; padding: 20px; border-radius: 15px; cursor: pointer; font-weight: bold; width: 100%; font-size: 18px; text-decoration:none; display:block; transition: 0.3s; }
+      .btn-connect:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(217,30,24,0.3); }
+    </style>
+    </head><body>
+    <div class="hero"><h1>Dans-Dans Trading Bot</h1></div>
+    <div class="container">
+        <div class="card">
+            <div style="background:#e8f5e9; color:#2e7d32; padding:6px 18px; border-radius:50px; display:inline-block; font-weight:bold; font-size:12px; margin-bottom:15px;">🚀 POWERED BY AI</div>
+            <h2 style="margin:0 0 10px 0; color:var(--dark);">Connect Your Account</h2>
+            <p style="color:#666; font-size:15px; line-height:1.6; margin-bottom:30px;">Get free access to our automated Digit-Over strategy. No subscription needed—just authorize and trade.</p>
+            
+            <a href="${authUrl}" class="btn-connect">Connect via Deriv</a>
+            
+            <p style="font-size:11px; color:#aaa; margin-top:20px;">Safe & Secure via Deriv OAuth2 Official Protocol</p>
+        </div>
+        <div style="text-align:center; margin-top:30px;"><a href="/admin-login" style="color:#ccc; text-decoration:none; font-size:11px; letter-spacing:1px;">ADMIN PORTAL</a></div>
     </div></body></html>`);
 });
 
-app.post('/payment-page', upload.single('strategyFile'), (req, res) => {
-  const { apiToken } = req.body;
-  const tempId = `User_${Math.floor(1000 + Math.random() * 9000)}`;
-  
-  // If a file was uploaded, we could process it here. For now, we save the token.
-  pendingUsers.set(tempId, { apiToken });
-  
-  res.send(`
-    <body style="font-family:sans-serif; background:#f4f7f6; display:flex; align-items:center; justify-content:center; height:100vh; margin:0;">
-      <div style="max-width:400px; width:90%; background:white; padding:30px; border-radius:20px; box-shadow:0 10px 30px rgba(0,0,0,0.1); text-align:center;">
-        <h2 style="color:#2c3e50;">Payment Details</h2>
-        <p>Send <b>${SUB_PRICE}</b> to M-Pesa:</p>
-        <h1 style="color:#1a1a1a; margin:15px 0;">${PAYMENT_NUMBER}</h1>
-        <p style="background:#f8f9fa; padding:10px; border-radius:8px; border:1px dashed #ccc;">Your ID: <b>${tempId}</b></p>
-        <a href="${HELP_LINK}" style="display:block; background:#2c3e50; color:white; padding:16px; text-decoration:none; border-radius:12px; font-weight:bold; margin-top:20px;">✅ Pay Now</a>
-        <div style="margin-top:20px;"><a href="/" style="color:#999; text-decoration:none; font-size:13px;">⬅️ Back</a></div>
-      </div>
-    </body>`);
+// OAuth2 Callback Route
+app.get('/callback', (req, res) => {
+    const { acct1, token1 } = req.query;
+    if (!token1) return res.send("Authorization failed. Please try again.");
+
+    const userId = `CR_${acct1}`;
+    pendingUsers.set(userId, { apiToken: token1 });
+
+    res.send(`
+        <body style="font-family:sans-serif; text-align:center; padding:50px; background:#f4f7f6;">
+            <div style="background:white; max-width:400px; margin:auto; padding:40px; border-radius:20px; box-shadow:0 10px 25px rgba(0,0,0,0.05);">
+                <h1 style="color:#27ae60;">Success!</h1>
+                <p style="color:#666;">Account <b>${userId}</b> is linked.</p>
+                <p style="background:#fff9c4; padding:10px; border-radius:8px; font-size:14px;">The admin is now activating your AI strategy. Please check your Deriv dashboard in a few minutes.</p>
+                <a href="/" style="color:var(--primary); text-decoration:none; font-weight:bold;">Return Home</a>
+            </div>
+        </body>`);
 });
 
-/* ================= STAFF PORTAL ================= */
+/* ================= STAFF MANAGEMENT ================= */
 
 app.get('/admin-login', (req, res) => {
-  res.send(`<div style="max-width:300px; margin: 100px auto; text-align:center;"><form action="/admin-portal" method="POST"><input type="password" name="password" placeholder="Admin Password" required><button type="submit">Login</button></form></div>`);
+  res.send(`<div style="max-width:300px; margin: 100px auto; text-align:center; font-family:sans-serif;">
+    <h3>Staff Login</h3>
+    <form action="/admin-portal" method="POST">
+        <input type="password" name="password" placeholder="Password" style="width:100%; padding:10px; margin-bottom:10px;" required>
+        <button type="submit" style="width:100%; padding:10px; background:#2c3e50; color:white; border:none; cursor:pointer;">Enter Dashboard</button>
+    </form>
+  </div>`);
 });
 
 app.post('/admin-portal', (req, res) => {
-  const { password } = req.body;
-  if (password !== ADMIN_PASSWORD) return res.send("Denied.");
+  if (req.body.password !== ADMIN_PASSWORD) return res.send("Access Denied");
+  
   let pendingRows = "";
   pendingUsers.forEach((data, id) => {
-    pendingRows += `<tr><td>${id}</td><td><form action="/manual-activate" method="POST"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit" style="background:#27ae60; color:white; border:none; padding:5px 10px; border-radius:4px; cursor:pointer;">Approve</button></form></td></tr>`;
+    pendingRows += `<tr>
+        <td><b>${id}</b></td>
+        <td>
+            <form action="/manual-activate" method="POST" style="margin:0;">
+                <input type="hidden" name="userId" value="${id}">
+                <input type="hidden" name="password" value="${ADMIN_PASSWORD}">
+                <button type="submit" style="background:#27ae60; color:white; border:none; padding:8px 15px; border-radius:5px; cursor:pointer;">Approve & Launch</button>
+            </form>
+        </td>
+    </tr>`;
   });
+
   res.send(`
-    <body style="font-family:sans-serif; padding:20px; background:#f4f7f6;">
-      <div style="max-width:1100px; margin:auto; background:white; padding:25px; border-radius:15px; box-shadow:0 4px 12px rgba(0,0,0,0.1);">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; border-bottom:2px solid #eee; padding-bottom:15px;">
-            <h1 style="margin:0;">🛡️ Staff Dashboard</h1>
-            <a href="/" style="background:#2c3e50; color:white; text-decoration:none; padding:10px 20px; border-radius:8px; font-weight:bold; font-size:14px;">🚪 Exit Dashboard</a>
+    <body style="font-family:sans-serif; padding:30px; background:#f4f7f6;">
+      <div style="max-width:1000px; margin:auto;">
+        <h1 style="color:#2c3e50;">🛡️ Dans-Dans Admin Dashboard</h1>
+        
+        <div style="background:white; padding:25px; border-radius:15px; margin-bottom:30px; box-shadow:0 4px 10px rgba(0,0,0,0.05);">
+            <h3 style="margin-top:0; color:#d91e18;">Pending Authorizations</h3>
+            <table border="1" width="100%" cellpadding="10" style="border-collapse:collapse; background:#fafafa;">
+                <thead><tr style="background:#eee;"><th>User Account</th><th>Action</th></tr></thead>
+                <tbody>${pendingRows || '<tr><td colspan="2" style="text-align:center;">No new users waiting</td></tr>'}</tbody>
+            </table>
         </div>
-        <div style="display:grid; grid-template-columns: 1fr 3.5fr; gap:25px;">
-          <div><h3>Pending</h3><table border="1" width="100%" style="border-collapse:collapse;">${pendingRows || '<tr><td>None</td></tr>'}</table></div>
-          <div><h3>Performance</h3><table border="1" width="100%" cellpadding="10" style="border-collapse:collapse;"><thead><tr style="background:#eee;"><th>ID</th><th>Balance</th><th>Session</th><th>Lifetime</th><th>Status</th><th>Actions</th></tr></thead><tbody>${generateStaffPerformanceTable()}</tbody></table></div>
+
+        <div style="background:white; padding:25px; border-radius:15px; box-shadow:0 4px 10px rgba(0,0,0,0.05);">
+            <h3 style="margin-top:0;">Live Bot Performance & Earnings</h3>
+            ${generateStaffDashboard()}
         </div>
+        
+        <div style="text-align:center; margin-top:20px;"><a href="/" style="color:#999; text-decoration:none;">Logout</a></div>
       </div>
     </body>`);
 });
@@ -202,10 +205,10 @@ app.post('/manual-activate', async (req, res) => {
     const data = pendingUsers.get(userId);
     try {
       await pool.query(
-        `INSERT INTO users (user_id, api_token, active, total_profit, lifetime_profit, trades_today, current_multiplier, is_running, trade_limit) 
-         VALUES ($1, $2, true, 0, 0, 0, 1, true, 0) ON CONFLICT (user_id) DO UPDATE SET active = true`, [userId, data.apiToken]
+        `INSERT INTO users (user_id, api_token, active, is_running) 
+         VALUES ($1, $2, true, true) ON CONFLICT (user_id) DO UPDATE SET active = true`, [userId, data.apiToken]
       );
-      await bootBot({ userId, apiToken: data.apiToken, isRunning: true, tradeLimit: 0, lifetimeProfit: 0 });
+      await bootBot({ userId, apiToken: data.apiToken, isRunning: true });
       pendingUsers.delete(userId);
       res.redirect(307, '/admin-portal');
     } catch (e) { res.status(500).send("DB Error: " + e.message); }
@@ -229,12 +232,8 @@ app.listen(PORT, async () => {
   try {
     const result = await pool.query("SELECT * FROM users WHERE active = true");
     result.rows.forEach(u => {
-      bootBot({
-        userId: u.user_id, apiToken: u.api_token, totalProfit: u.total_profit,
-        lifetimeProfit: u.lifetime_profit, tradesToday: u.trades_today,
-        isRunning: u.is_running, tradeLimit: u.trade_limit
-      });
+      bootBot({ userId: u.user_id, apiToken: u.api_token, isRunning: u.is_running });
     });
-  } catch (e) { console.error("DB Startup Error:", e.message); }
+  } catch (e) { console.error("Database Error:", e.message); }
   listenTelegramAdmin(bots);
 });
