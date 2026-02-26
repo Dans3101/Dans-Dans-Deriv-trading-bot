@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 /* ================= CONFIGURATION ================= */
 const APP_ID = process.env.DERIV_APP_ID || "129457"; 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
-const MARKUP_PERCENT = 0.001; 
+const MARKUP_PERCENT = 0.1; // 0.1% as seen in your settings
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -33,16 +33,19 @@ async function bootBot(userData) {
       isRunning: userData.isRunning ?? true
     };
     const bot = new DerivBot(session);
+    
     bot.onConnectionError = (err) => {
         console.error(`⚠️ Connection Error [${userData.userId}]: ${err.message}`);
         bots.delete(userData.userId);
     };
+
     bot.onTradeExecuted = (stake) => {
-      // Markup is only valid for Real accounts
+      // Only track volume for REAL accounts per Deriv UI
       if (!userData.userId.includes('VRTC')) {
         totalVolumeTraded += Number(stake);
       }
     };
+
     bot.connect();
     bots.set(userData.userId, bot);
   } catch (error) {
@@ -55,20 +58,25 @@ async function bootBot(userData) {
 function generateUserTrackingCard(shortId) {
     let activeBot = null;
     bots.forEach((bot, id) => { if (id.endsWith(shortId)) activeBot = bot; });
-    if (!activeBot) return `<div style="padding:20px; color:red;">❌ Session not found.</div><a href="/" class="btn btn-dark">Reconnect</a>`;
+    
+    if (!activeBot) return `<div style="padding:20px; color:red;">❌ Session not found. Re-link account.</div><a href="/" class="btn btn-dark">Home</a>`;
 
     const u = activeBot.user;
     const isDemo = u.userId.includes('VRTC');
     const authUrl = `https://oauth.deriv.com/oauth2/authorize?app_id=${APP_ID}&l=EN&brand=deriv`;
     
+    // REDIRECT TARGET: This sends them to the page in your 4th screenshot
+    const derivLiveUrl = isDemo ? "https://dbot.deriv.com/bot" : "https://app.deriv.com/reports/positions";
+
     return `
         <div style="text-align:left;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
                 <b style="color:#2c3e50;">ID: ${u.userId}</b>
                 <span style="background:${isDemo ? '#fff3e0' : '#e8f5e9'}; color:${isDemo ? '#e67e22' : '#2e7d32'}; padding:3px 10px; border-radius:50px; font-size:11px; font-weight:bold;">
-                    ${isDemo ? '🟡 DEMO' : '🟢 REAL'}
+                    ${isDemo ? '🔵 DEMO' : '🟢 REAL'}
                 </span>
             </div>
+            
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:15px;">
                 <div style="background:#f8f9fa; padding:12px; border-radius:10px; border:1px solid #eee; text-align:center;">
                     <small style="color:#888;">Balance</small><br><b style="font-size:18px;">$${Number(u.currentBalance || 0).toFixed(2)}</b>
@@ -77,21 +85,25 @@ function generateUserTrackingCard(shortId) {
                     <small style="color:#888;">Profit</small><br><b style="font-size:18px; color:${u.totalProfit >= 0 ? '#27ae60' : '#d91e18'};">$${Number(u.totalProfit || 0).toFixed(2)}</b>
                 </div>
             </div>
+
             <div style="display:flex; flex-direction:column; gap:8px;">
                 <form action="/user/toggle" method="POST">
                     <input type="hidden" name="trackId" value="${shortId}">
                     <button type="submit" style="width:100%; padding:14px; border-radius:12px; border:none; background:${u.isRunning ? '#e67e22' : '#27ae60'}; color:white; font-weight:bold; cursor:pointer;">
-                        ${u.isRunning ? '🛑 Stop Trading' : '🚀 Start Trading'}
+                        ${u.isRunning ? '🛑 Stop AI Bot' : '🚀 Start & Go Live'}
                     </button>
                 </form>
-                <a href="${authUrl}" style="text-align:center; padding:12px; background:#3498db; color:white; border-radius:12px; text-decoration:none; font-weight:bold; font-size:14px;">🔄 Switch Account (Real/Demo)</a>
-                <a href="https://app.deriv.com/reports/positions" target="_blank" style="text-align:center; padding:12px; background:#2c3e50; color:white; border-radius:12px; text-decoration:none; font-weight:bold; font-size:14px;">📊 View on Deriv</a>
+                
+                <a href="${authUrl}" style="text-align:center; padding:12px; background:#3498db; color:white; border-radius:12px; text-decoration:none; font-weight:bold; font-size:14px;">🔄 Switch Account</a>
+                
+                <a href="${derivLiveUrl}" target="_blank" style="text-align:center; padding:12px; background:#2c3e50; color:white; border-radius:12px; text-decoration:none; font-weight:bold; font-size:14px;">📊 Watch Live Trades</a>
+                
                 <a href="/" style="text-align:center; padding:10px; color:#999; text-decoration:none; font-size:12px;">✖ Exit Tracking</a>
             </div>
         </div>`;
 }
 
-/* ================= WEB ROUTES ================= */
+/* ================= ROUTES ================= */
 
 app.get('/', (req, res) => {
   const trackId = req.query.trackId;
@@ -108,18 +120,18 @@ app.get('/', (req, res) => {
     </style>
     </head><body>
       <div class="container">
-        <h2 style="color:#2c3e50; margin-bottom:20px;">Dans-Dans AI Dashboard</h2>
+        <h2 style="color:#2c3e50;">Dans-Dans AI Dashboard</h2>
+        <p style="font-size:12px; color:#888;">App ID: ${APP_ID}</p>
         ${trackId ? `<div class="card">${generateUserTrackingCard(trackId)}</div>` : `
           <div class="card">
-            <h3>Launch Bot</h3>
-            <p style="color:#666; font-size:14px;">Connect your account to start the AI Digit strategy.</p>
+            <h3>Connect Account</h3>
             <a href="${authUrl}" class="btn btn-red">Connect via Deriv</a>
           </div>
           <div class="card">
-            <h3>Monitor Activity</h3>
+            <h3>Track Activity</h3>
             <form action="/" method="GET">
-                <input type="text" name="trackId" placeholder="Last 4 digits of ID" style="width:100%; padding:14px; margin-bottom:10px; border:1px solid #eee; border-radius:10px; box-sizing:border-box; text-align:center; font-size:16px;">
-                <button type="submit" class="btn btn-dark">Track Bot</button>
+                <input type="text" name="trackId" placeholder="Last 4 digits of Account" style="width:100%; padding:14px; margin-bottom:10px; border:1px solid #eee; border-radius:10px; box-sizing:border-box; text-align:center;">
+                <button type="submit" class="btn btn-dark">Enter Dashboard</button>
             </form>
           </div>
         `}
@@ -139,60 +151,54 @@ app.get('/callback', async (req, res) => {
     } catch (e) { res.send("Error saving account."); }
 });
 
-/* ================= ADMIN PORTAL RESTORED ================= */
+/* ================= ADMIN PORTAL ================= */
 
 app.get('/admin-login', (req, res) => {
-    res.send(`<body style="display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif; background:#f4f7f6;"><div style="background:white; padding:30px; border-radius:20px; text-align:center;"><form action="/admin-portal" method="POST"><h3>Admin Login</h3><input type="password" name="password" placeholder="Password" style="padding:12px; margin-bottom:10px;"><br><button type="submit">Login</button></form><br><a href="/" style="color:#999; text-decoration:none;">✖ Exit</a></div></body>`);
+    res.send(`<body style="display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif;"><div style="background:white; padding:30px; border-radius:20px; text-align:center;"><form action="/admin-portal" method="POST"><h3>Admin</h3><input type="password" name="password" style="padding:10px; margin-bottom:10px;"><br><button type="submit">Login</button></form></div></body>`);
 });
 
 app.post('/admin-portal', (req, res) => {
-  if (req.body.password !== ADMIN_PASSWORD) return res.send("Access Denied");
-  const commission = (totalVolumeTraded * MARKUP_PERCENT).toFixed(2);
+  if (req.body.password !== ADMIN_PASSWORD) return res.send("Denied");
+  const commission = (totalVolumeTraded * (MARKUP_PERCENT / 100)).toFixed(2);
   let rows = "";
   bots.forEach((bot, id) => {
-    rows += `<tr><td>${id}</td><td>$${Number(bot.user.currentBalance).toFixed(2)}</td><td style="color:${bot.user.totalProfit >= 0 ? 'green' : 'red'}">$${Number(bot.user.totalProfit).toFixed(2)}</td><td>${bot.user.isRunning ? '🟢 Active' : '🟠 Paused'}</td><td><form action="/delete" method="POST" style="margin:0;"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="password" value="${ADMIN_PASSWORD}"><button type="submit" style="background:red; color:white; border:none; padding:5px 10px; border-radius:5px; cursor:pointer;">Kill</button></form></td></tr>`;
+    rows += `<tr><td>${id}</td><td>$${Number(bot.user.totalProfit).toFixed(2)}</td><td>${bot.user.isRunning ? '🟢 Live' : '🟠 Off'}</td></tr>`;
   });
-  res.send(`
-    <body style="font-family:sans-serif; background:#f4f7f6; padding:20px;">
-      <div style="max-width:900px; margin:auto; background:white; padding:30px; border-radius:20px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;"><h2>🛡️ Admin Control</h2><a href="/" style="background:#2c3e50; color:white; text-decoration:none; padding:10px 20px; border-radius:10px;">Exit</a></div>
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; margin-bottom:30px; text-align:center;">
-            <div style="background:#e3f2fd; padding:15px; border-radius:15px;">Volume: <b>$${totalVolumeTraded.toFixed(2)}</b></div>
-            <div style="background:#e8f5e9; padding:15px; border-radius:15px;">Markup: <b style="color:green;">$${commission}</b></div>
-        </div>
-        <table border="1" width="100%" cellpadding="10" style="border-collapse:collapse;"><thead><tr style="background:#eee;"><th>User ID</th><th>Balance</th><th>Profit</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No active bots</td></tr>'}</tbody></table>
-      </div>
-    </body>`);
+  res.send(`<body style="font-family:sans-serif; padding:20px;"><h2>Staff Dashboard</h2><p>Markup Earnings: $${commission}</p><table border="1" width="100%">${rows}</table><br><a href="/">Exit</a></body>`);
 });
+
+/* ================= TOGGLE LOGIC ================= */
 
 app.post('/user/toggle', async (req, res) => {
     const { trackId } = req.body;
-    bots.forEach(async (bot, id) => { 
-        if (id.endsWith(trackId)) {
-            bot.user.isRunning = !bot.user.isRunning;
-            await pool.query("UPDATE users SET is_running = $1 WHERE user_id = $2", [bot.user.isRunning, bot.user.userId]);
-            if (!bot.user.isRunning) bot.stop(); else bot.connect();
-        } 
-    });
-    res.redirect(`/?trackId=${trackId}`);
-});
+    let targetBot = null;
+    let botUserId = "";
 
-app.post('/delete', async (req, res) => {
-  const { userId, password } = req.body;
-  if (password === ADMIN_PASSWORD) {
-    const bot = bots.get(userId);
-    if (bot?.user?.ws) bot.user.ws.terminate();
-    bots.delete(userId);
-    await pool.query("DELETE FROM users WHERE user_id = $1", [userId]);
-  }
-  res.redirect(307, '/admin-portal');
+    bots.forEach((bot, id) => { if (id.endsWith(trackId)) { targetBot = bot; botUserId = id; } });
+
+    if (targetBot) {
+        targetBot.user.isRunning = !targetBot.user.isRunning;
+        await pool.query("UPDATE users SET is_running = $1 WHERE user_id = $2", [targetBot.user.isRunning, targetBot.user.userId]);
+        
+        if (!targetBot.user.isRunning) {
+            targetBot.stop();
+            res.redirect(`/?trackId=${trackId}`);
+        } else {
+            targetBot.connect();
+            // If they press START, redirect them to the LIVE TRADING PAGE immediately
+            const redirectUrl = botUserId.includes('VRTC') ? "https://dbot.deriv.com/bot" : "https://app.deriv.com/reports/positions";
+            res.send(`<html><script>window.open("${redirectUrl}", "_blank"); window.location.href="/?trackId=${trackId}";</script></html>`);
+        }
+    } else {
+        res.redirect('/');
+    }
 });
 
 app.listen(PORT, async () => {
-  console.log(`🌐 Server Active on ${PORT}`);
+  console.log(`🌐 Active on ${PORT}`);
   try {
     const result = await pool.query("SELECT * FROM users WHERE active = true");
     result.rows.forEach(u => bootBot({ userId: u.user_id, apiToken: u.api_token, isRunning: u.is_running }));
-  } catch (e) { console.error("Database Startup Error"); }
+  } catch (e) { console.error("DB Error"); }
   listenTelegramAdmin(bots);
 });
