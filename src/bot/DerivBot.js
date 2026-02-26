@@ -59,6 +59,12 @@ class AccumulatorBot {
 
     if (this.user.ws?.readyState === WebSocket.OPEN) {
       this.user.ws.send(JSON.stringify(payload));
+      
+      // === NEW: TRACKING FOR MARKUP REVENUE ===
+      // This calls the hook we added in index.js to track your 0.1% earnings
+      if (this.bot && typeof this.bot.onTradeExecuted === 'function') {
+        this.bot.onTradeExecuted(finalStake);
+      }
     } else {
       this.inTrade = false;
     }
@@ -70,15 +76,11 @@ class AccumulatorBot {
     const profit = Number(contract.profit);
     const result = profit >= 0 ? 'WIN' : 'LOSS';
     
-    // 1. Update Session Stats (Resettable)
     updateStats(this.user, profit);
-    
-    // 2. Update Lifetime Profit (Permanent)
     this.user.lifetimeProfit = (Number(this.user.lifetimeProfit) || 0) + profit;
     
     console.log(`[${this.user.userId}] 💰 ${result}: $${profit.toFixed(2)} | Session: $${this.user.totalProfit.toFixed(2)} | Lifetime: $${this.user.lifetimeProfit.toFixed(2)}`);
     
-    // 3. Log to CSV/File
     logTrade({
       userId: this.user.userId,
       market: this.user.market,
@@ -96,16 +98,18 @@ export class DerivBot {
   constructor(user) {
     this.user = user;
     this.user.active = false;
-    
     this.user.isRunning = user.isRunning !== undefined ? user.isRunning : true;
     this.user.tradeLimit = user.tradeLimit || 0;
-
     this.user.currentBalance = 0;
     this.user.tradesToday = user.tradesToday || 0;
     this.user.totalProfit = user.totalProfit || 0;
-    this.user.lifetimeProfit = user.lifetimeProfit || 0; // NEW: Tracked from DB
+    this.user.lifetimeProfit = user.lifetimeProfit || 0;
     this.user.currentMultiplier = user.currentMultiplier || 1;
     
+    // Safety Hooks for index.js
+    this.onConnectionError = null; 
+    this.onTradeExecuted = null;
+
     if (!this.user.baseStake) this.user.baseStake = 2.0;
     if (!this.user.targetProfit) this.user.targetProfit = 607; 
     
@@ -120,40 +124,60 @@ export class DerivBot {
   }
 
   start(newLimit = 0) {
-    // Only resets Session stats, NOT lifetimeProfit
     this.user.tradesToday = 0;
     this.user.totalProfit = 0;
     this.user.currentMultiplier = 1; 
     this.user.tradeLimit = newLimit;
     this.user.isRunning = true;
-    console.log(`[${this.user.userId}] Bot Session Reset. Lifetime stays at $${this.user.lifetimeProfit.toFixed(2)}`);
+    console.log(`[${this.user.userId}] Bot Session Reset.`);
   }
 
   connect() {
-    const appId = process.env.DERIV_APP_ID || 1089;
-    this.user.ws = new WebSocket(DERIV_WS(appId));
+    // === NEW: USES THE RENDER ENV APP ID OR YOUR REGISTERED ONE ===
+    const appId = process.env.DERIV_APP_ID || "129457";
+    
+    // Connect to Deriv using WebSocket
+    this.user.ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${appId}`);
+
+    // === NEW: CRITICAL ERROR HANDLING (STOPS RENDER CRASH) ===
+    this.user.ws.on('error', err => {
+      console.error(`❌ WS Error for ${this.user.userId}:`, err.message);
+      if (this.onConnectionError) this.onConnectionError(err);
+    });
+
     this.user.ws.on('open', () => { 
         this.authorize(); 
     });
+
     this.user.ws.on('message', msg => {
       try {
         const data = JSON.parse(msg);
+        
+        // Handle API level errors (like invalid tokens)
         if (data.error) {
+          console.error(`⚠️ Deriv API Error [${this.user.userId}]:`, data.error.message);
           if (data.msg_type === 'buy') this.accBot.inTrade = false;
+          if (data.error.code === 'AuthorizationRequired' || data.error.code === 'InvalidToken') {
+              this.user.isRunning = false; // Stop bot if token is bad
+          }
           return;
         }
         this.handleMessage(data);
       } catch (e) { console.error("JSON Error:", e.message); }
     });
+
     this.user.ws.on('close', () => { 
         this.user.active = false; 
         if (this.user.isRunning) {
+            // Reconnect after 5 seconds if bot is supposed to be running
             setTimeout(() => this.connect(), 5000); 
         }
     });
   }
 
-  authorize() { this.user.ws.send(JSON.stringify({ authorize: this.user.apiToken })); }
+  authorize() { 
+    this.user.ws.send(JSON.stringify({ authorize: this.user.apiToken })); 
+  }
 
   handleMessage(data) {
     switch (data.msg_type) {
