@@ -24,28 +24,48 @@ app.use(express.json());
 
 export const bots = new Map();
 
-/* ================= BOT BOOT LOGIC ================= */
+/* ================= BOT LOGIC ================= */
 async function bootBot(userData) {
   if (bots.has(userData.userId)) return;
 
   try {
-    const session = { ...userData, totalProfit: 0, isRunning: true };
+    const session = { ...userData, totalProfit: 0, isRunning: false };
     const bot = new DerivBot(session);
-
-    bot.connect();
     bots.set(userData.userId, bot);
-
-    console.log(`✅ Bot started for ${userData.userId}`);
+    console.log(`✅ Bot instance ready for ${userData.userId}`);
   } catch (e) {
     console.error("Bot boot failed:", e.message);
   }
 }
 
-/* ================= WEB UI ================= */
+function startBot(userId) {
+  const bot = bots.get(userId);
+  if (!bot) return false;
+  if (!bot.isRunning) {
+    bot.connect();
+    bot.isRunning = true;
+    console.log(`🚀 Bot started for ${userId}`);
+    return true;
+  }
+  return false;
+}
+
+function stopBot(userId) {
+  const bot = bots.get(userId);
+  if (!bot) return false;
+  if (bot.isRunning) {
+    bot.disconnect?.();
+    bot.isRunning = false;
+    console.log(`🛑 Bot stopped for ${userId}`);
+    return true;
+  }
+  return false;
+}
+
+/* ================= FRONTEND ================= */
 
 app.get('/', (req, res) => {
   const { token, acct } = req.query;
-
   const authUrl = `https://oauth.deriv.com/oauth2/authorize?app_id=${APP_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
 
   res.send(`
@@ -55,20 +75,33 @@ app.get('/', (req, res) => {
     <title>Dans-Dans Trading Bot</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-      body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; margin: 0; display:flex; flex-direction:column; height:100vh; }
-      nav { background: #102a43; color: white; padding: 12px 20px; display:flex; justify-content:space-between; align-items:center; }
+      body { font-family: 'Segoe UI', sans-serif; background:#f0f2f5; margin:0; display:flex; flex-direction:column; height:100vh; }
+      nav { background:#102a43; color:white; padding:12px 20px; display:flex; justify-content:space-between; align-items:center; }
       .main { flex:1; display:flex; justify-content:center; align-items:center; padding:20px; }
-      .card { background:white; padding:30px; border-radius:12px; width:100%; max-width:350px; text-align:center; box-shadow:0 4px 15px rgba(0,0,0,0.08); }
+      .card { background:white; padding:30px; border-radius:12px; width:100%; max-width:400px; text-align:center; box-shadow:0 4px 15px rgba(0,0,0,0.08); }
       .btn { padding:12px 20px; border-radius:8px; border:none; font-weight:bold; cursor:pointer; text-decoration:none; display:inline-block; }
       .btn-primary { background:#102a43; color:white; width:100%; margin-top:15px; }
-      iframe { width:100%; height:100%; border:none; }
+      .btn-run { background:#27ae60; color:white; width:48%; margin-top:10px; margin-right:2%; }
+      .btn-stop { background:#d91e18; color:white; width:48%; margin-top:10px; }
+      .status { margin-top:15px; font-size:14px; color:#555; }
     </style>
+    <script>
+      async function runBot() {
+        const res = await fetch('/start-bot', { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ token:'${token}' }) });
+        const data = await res.json();
+        document.getElementById('bot-status').innerText = data.success ? 'Bot Running 🚀' : 'Failed to start';
+      }
+      async function stopBotFunc() {
+        const res = await fetch('/stop-bot', { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ token:'${token}' }) });
+        const data = await res.json();
+        document.getElementById('bot-status').innerText = data.success ? 'Bot Stopped 🛑' : 'Failed to stop';
+      }
+    </script>
   </head>
   <body>
-
     <nav>
       <div><strong>Dans-Dans Trading Bot</strong></div>
-      ${token ? `<a href="/" style="color:white; text-decoration:none;">Logout</a>` : ''}
+      ${token ? `<a href="/" style="color:white;text-decoration:none;">Logout</a>` : ''}
     </nav>
 
     <div class="main">
@@ -79,11 +112,11 @@ app.get('/', (req, res) => {
           <a href="${authUrl}" class="btn btn-primary">Connect to Deriv</a>
         </div>
       ` : `
-        <div style="width:100%; height:100%; display:flex; flex-direction:column;">
-          <div style="background:#fff; padding:10px; text-align:center; border-bottom:1px solid #ddd;">
-            Account: <b style="color:#d91e18;">${acct}</b> | Status: <b style="color:#27ae60;">Connected</b>
-          </div>
-          <iframe src="https://dbot.deriv.com/?token=${token}"></iframe>
+        <div class="card">
+          <h2>Connected: ${acct}</h2>
+          <div class="status" id="bot-status">Bot Ready 🟡</div>
+          <button class="btn btn-run" onclick="runBot()">Run Bot</button>
+          <button class="btn btn-stop" onclick="stopBotFunc()">Stop Bot</button>
         </div>
       `}
     </div>
@@ -93,28 +126,23 @@ app.get('/', (req, res) => {
   `);
 });
 
-/* ================= CALLBACK ROUTE ================= */
+/* ================= CALLBACK ================= */
 
 app.get('/callback', async (req, res) => {
   const { acct1, token1 } = req.query;
-
-  if (!token1) {
-    return res.send("<h2>Connection Failed</h2><p>No token received.</p><a href='/'>Go Back</a>");
-  }
+  if (!token1) return res.send("<h2>Connection Failed</h2><p>No token received.</p><a href='/'>Go Back</a>");
 
   const userId = acct1.includes('VRTC') ? acct1 : `CR_${acct1}`;
 
   try {
     await pool.query(
       `INSERT INTO users (user_id, api_token, active, is_running)
-       VALUES ($1, $2, true, true)
-       ON CONFLICT (user_id)
-       DO UPDATE SET api_token = $2`,
+       VALUES ($1,$2,true,false)
+       ON CONFLICT(user_id) DO UPDATE SET api_token=$2`,
       [userId, token1]
     );
 
     await bootBot({ userId, apiToken: token1 });
-
     console.log(`🔐 User connected: ${acct1}`);
 
     res.redirect(`/?token=${token1}&acct=${acct1}`);
@@ -124,11 +152,33 @@ app.get('/callback', async (req, res) => {
   }
 });
 
+/* ================= BOT CONTROL ROUTES ================= */
+
+app.post('/start-bot', async (req, res) => {
+  const { token } = req.body;
+  try {
+    const user = await pool.query("SELECT user_id FROM users WHERE api_token=$1", [token]);
+    if (!user.rows[0]) return res.json({ success:false });
+    const success = startBot(user.rows[0].user_id);
+    res.json({ success });
+  } catch (e) { res.json({ success:false }); }
+});
+
+app.post('/stop-bot', async (req, res) => {
+  const { token } = req.body;
+  try {
+    const user = await pool.query("SELECT user_id FROM users WHERE api_token=$1", [token]);
+    if (!user.rows[0]) return res.json({ success:false });
+    const success = stopBot(user.rows[0].user_id);
+    res.json({ success });
+  } catch (e) { res.json({ success:false }); }
+});
+
 /* ================= ADMIN ================= */
 
 app.get('/admin-login', (req, res) => {
   res.send(`
-    <body style="display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif;">
+    <body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;">
       <form action="/admin-portal" method="POST">
         <h3>Staff Access</h3>
         <input type="password" name="password" placeholder="Password"/>
@@ -147,15 +197,10 @@ app.post('/admin-portal', (req, res) => {
 
 app.listen(PORT, async () => {
   console.log(`🌐 Server running on port ${PORT}`);
-
   try {
     const result = await pool.query("SELECT * FROM users WHERE active = true");
-    result.rows.forEach(u =>
-      bootBot({ userId: u.user_id, apiToken: u.api_token })
-    );
-  } catch (e) {
-    console.error("Database Startup Error:", e.message);
-  }
+    result.rows.forEach(u => bootBot({ userId: u.user_id, apiToken: u.api_token }));
+  } catch (e) { console.error("Database Startup Error:", e.message); }
 
   listenTelegramAdmin(bots);
 });
