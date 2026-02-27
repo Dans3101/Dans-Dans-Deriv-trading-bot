@@ -12,7 +12,7 @@ const REDIRECT_URI = `${BASE_URL}/deriv-callback`;
 // Only one bot for now
 const bots = [
   {
-    name: "AI Digit Strategy v3.1",
+    name: "Dans-Dans bot",
     xmlUrl: "https://raw.githubusercontent.com/Dans3101/Dans-Dans-Deriv-trading-bot/main/bots/digit_over.xml"
   }
 ];
