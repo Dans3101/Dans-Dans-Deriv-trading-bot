@@ -9,15 +9,11 @@ const BASE_URL = process.env.BASE_URL || "https://dans-dans-deriv-trading-bot.on
 const REDIRECT_URI = `${BASE_URL}/deriv-callback`;
 
 /* ================= BOT CONFIG ================= */
-// List of bots (XML URLs) you control
+// Only one bot for now
 const bots = [
   {
     name: "AI Digit Strategy v3.1",
-    xmlUrl: "https://raw.githubusercontent.com/Dans3101/Dans-Dans-Deriv-trading-bot/main/src/bot/xml/your-bot.xml"
-  },
-  {
-    name: "Super Quick Scalper",
-    xmlUrl: "https://raw.githubusercontent.com/Dans3101/Dans-Dans-Deriv-trading-bot/main/src/bot/xml/another-bot.xml"
+    xmlUrl: "https://raw.githubusercontent.com/Dans3101/Dans-Dans-Deriv-trading-bot/main/bots/digit_over.xml"
   }
 ];
 
@@ -61,11 +57,9 @@ app.get('/', (req, res) => {
 
 /* ================= DERIV CALLBACK ================= */
 app.get('/deriv-callback', (req, res) => {
-  // Deriv will redirect here after login
   const { bot } = req.query;
   if (!bot) return res.send("<h2>Error: No bot selected</h2>");
 
-  // Optionally, redirect to a page confirming bot launch
   res.send(`
     <h2>Bot Ready!</h2>
     <p>Your bot will now launch on Deriv: <strong>${bot}</strong></p>
