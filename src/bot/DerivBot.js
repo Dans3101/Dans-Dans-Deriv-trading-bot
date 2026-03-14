@@ -27,19 +27,14 @@ class AccumulatorBot {
   }
 
   placeTrade(prediction, stake) {
-    if (!this.user.active || !this.user.isRunning || this.inTrade || !canTrade(this.user)) return;
-
-    if (this.user.tradeLimit > 0 && this.user.tradesToday >= this.user.tradeLimit) {
-        console.log(`[${this.user.userId}] Trade limit reached. Stopping.`);
-        this.user.isRunning = false;
-        this.safeTelegram(`🛑 Bot ${this.user.userId} reached trade limit of ${this.user.tradeLimit}. Stopped.`);
-        return;
-    }
+    if (!this.user.active || this.inTrade || !canTrade(this.user)) return;
 
     const limits = checkLimits(this.user);
     if (limits !== 'OK') return;
 
+    // Use the dynamic stake calculated by riskManager (Martingale ready)
     const finalStake = stake || 2.0;
+
     this.inTrade = true;
 
     const payload = {
@@ -48,23 +43,18 @@ class AccumulatorBot {
       parameters: {
         amount: finalStake,
         basis: 'stake',
-        contract_type: 'DIGITOVER',
+        contract_type: 'DIGITOVER', // CHANGED: From DIGITDIFF to DIGITOVER
         currency: 'USD',
         duration: 1,
         duration_unit: 't',
         symbol: this.user.market || 'R_100',
-        barrier: "5" 
+        barrier: "5" // CHANGED: Prediction is now Over 5 (Wins on 6, 7, 8, 9)
       }
     };
 
+    console.log(`[${this.user.userId}] 🚀 PRINTING: Over 5 | Stake: $${finalStake}`);
     if (this.user.ws?.readyState === WebSocket.OPEN) {
       this.user.ws.send(JSON.stringify(payload));
-      
-      // === NEW: TRACKING FOR MARKUP REVENUE ===
-      // This calls the hook we added in index.js to track your 0.1% earnings
-      if (this.bot && typeof this.bot.onTradeExecuted === 'function') {
-        this.bot.onTradeExecuted(finalStake);
-      }
     } else {
       this.inTrade = false;
     }
@@ -76,15 +66,16 @@ class AccumulatorBot {
     const profit = Number(contract.profit);
     const result = profit >= 0 ? 'WIN' : 'LOSS';
     
+    // updateStats handles the Martingale multiplier inside riskManager
     updateStats(this.user, profit);
-    this.user.lifetimeProfit = (Number(this.user.lifetimeProfit) || 0) + profit;
     
-    console.log(`[${this.user.userId}] 💰 ${result}: $${profit.toFixed(2)} | Session: $${this.user.totalProfit.toFixed(2)} | Lifetime: $${this.user.lifetimeProfit.toFixed(2)}`);
-    
+    console.log(`[${this.user.userId}] 💰 ${result}: $${profit.toFixed(2)} | Today: ${this.user.tradesToday}`);
+    this.safeTelegram(`🔔 ${result} | P: $${profit.toFixed(2)} | Today: ${this.user.tradesToday} | Bal: ${this.user.currentBalance}`);
+
     logTrade({
       userId: this.user.userId,
       market: this.user.market,
-      direction: 'DIGITOVER',
+      direction: 'DIGITOVER', // Updated log label
       stake: contract.buy_price || 0,
       profit,
       balance: this.user.currentBalance
@@ -98,18 +89,11 @@ export class DerivBot {
   constructor(user) {
     this.user = user;
     this.user.active = false;
-    this.user.isRunning = user.isRunning !== undefined ? user.isRunning : true;
-    this.user.tradeLimit = user.tradeLimit || 0;
     this.user.currentBalance = 0;
-    this.user.tradesToday = user.tradesToday || 0;
-    this.user.totalProfit = user.totalProfit || 0;
-    this.user.lifetimeProfit = user.lifetimeProfit || 0;
-    this.user.currentMultiplier = user.currentMultiplier || 1;
+    this.user.tradesToday = 0;
+    this.user.totalProfit = 0;
     
-    // Safety Hooks for index.js
-    this.onConnectionError = null; 
-    this.onTradeExecuted = null;
-
+    // XML Settings: Target $607 profit, Base stake $2
     if (!this.user.baseStake) this.user.baseStake = 2.0;
     if (!this.user.targetProfit) this.user.targetProfit = 607; 
     
@@ -118,66 +102,31 @@ export class DerivBot {
     if (!this.user.market) this.user.market = 'R_100';
   }
 
-  stop() {
-    this.user.isRunning = false;
-    console.log(`[${this.user.userId}] Bot manually stopped.`);
-  }
-
-  start(newLimit = 0) {
-    this.user.tradesToday = 0;
-    this.user.totalProfit = 0;
-    this.user.currentMultiplier = 1; 
-    this.user.tradeLimit = newLimit;
-    this.user.isRunning = true;
-    console.log(`[${this.user.userId}] Bot Session Reset.`);
-  }
-
   connect() {
-    // === NEW: USES THE RENDER ENV APP ID OR YOUR REGISTERED ONE ===
-    const appId = process.env.DERIV_APP_ID || "129457";
-    
-    // Connect to Deriv using WebSocket
-    this.user.ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${appId}`);
-
-    // === NEW: CRITICAL ERROR HANDLING (STOPS RENDER CRASH) ===
-    this.user.ws.on('error', err => {
-      console.error(`❌ WS Error for ${this.user.userId}:`, err.message);
-      if (this.onConnectionError) this.onConnectionError(err);
-    });
-
+    const appId = process.env.DERIV_APP_ID || 1089;
+    this.user.ws = new WebSocket(DERIV_WS(appId));
     this.user.ws.on('open', () => { 
+        console.log(`[${this.user.userId}] Connection Active`); 
         this.authorize(); 
     });
-
     this.user.ws.on('message', msg => {
       try {
         const data = JSON.parse(msg);
-        
-        // Handle API level errors (like invalid tokens)
         if (data.error) {
-          console.error(`⚠️ Deriv API Error [${this.user.userId}]:`, data.error.message);
+          console.error(`[${this.user.userId}] API Error:`, data.error.message);
           if (data.msg_type === 'buy') this.accBot.inTrade = false;
-          if (data.error.code === 'AuthorizationRequired' || data.error.code === 'InvalidToken') {
-              this.user.isRunning = false; // Stop bot if token is bad
-          }
           return;
         }
         this.handleMessage(data);
       } catch (e) { console.error("JSON Error:", e.message); }
     });
-
     this.user.ws.on('close', () => { 
         this.user.active = false; 
-        if (this.user.isRunning) {
-            // Reconnect after 5 seconds if bot is supposed to be running
-            setTimeout(() => this.connect(), 5000); 
-        }
+        setTimeout(() => this.connect(), 5000); 
     });
   }
 
-  authorize() { 
-    this.user.ws.send(JSON.stringify({ authorize: this.user.apiToken })); 
-  }
+  authorize() { this.user.ws.send(JSON.stringify({ authorize: this.user.apiToken })); }
 
   handleMessage(data) {
     switch (data.msg_type) {
@@ -198,6 +147,7 @@ export class DerivBot {
       case 'proposal_open_contract':
         const contract = data.proposal_open_contract;
         if (contract.is_sold) {
+          // Send result to monitor for pause/trend logic
           this.digitMonitor.onResult(contract.profit >= 0 ? 'win' : 'loss');
           this.accBot.handleContractUpdate(contract);
           if (data.subscription) this.user.ws.send(JSON.stringify({ forget: data.subscription.id }));
@@ -207,9 +157,10 @@ export class DerivBot {
   }
 
   handleTick(tick) {
-    if (!tick?.quote || !this.user.isRunning) return;
+    if (!tick?.quote) return;
     this.digitMonitor.add(tick.quote);
     
+    // The strategy now decides based on the "Over 5" logic
     const prediction = decideFromMonitor(this.digitMonitor);
     
     if (prediction !== null) {
