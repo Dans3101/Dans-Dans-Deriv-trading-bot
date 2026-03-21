@@ -1,112 +1,104 @@
 /**
  * src/bot/riskManager.js
- * Optimized for Digit Over 5 Strategy with Supabase Persistence
+ * Optimized for Digit Over 5 Strategy with Martingale Recovery
  */
-import pg from 'pg';
-const { Pool } = pg;
 
-// Connection pool uses the environment variable you added to Render
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+// Track multiplier in memory for the session
+let currentMultiplier = 1;
 
 /**
- * Saves live progress directly to Supabase
+ * NEW FUNCTION: Call this after every trade to update the user object
  */
-async function saveUserProgress(userId, totalProfit, tradesToday, multiplier) {
-  try {
-    // We use an "UPSERT" (Update or Insert) query
-    const query = `
-      INSERT INTO users (user_id, total_profit, trades_today, current_multiplier) 
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT (user_id) 
-      DO UPDATE SET 
-        total_profit = EXCLUDED.total_profit,
-        trades_today = EXCLUDED.trades_today,
-        current_multiplier = EXCLUDED.current_multiplier;
-    `;
-    
-    await pool.query(query, [userId, totalProfit, tradesToday, multiplier]);
-    console.log(`[DB SAVE] Success for ${userId}`);
-  } catch (e) {
-    console.error("[DB SAVE ERROR] Persistence failed:", e.message);
-  }
-}
-
-export async function updateStats(user, profit) {
+export function updateStats(user, profit) {
   if (!user) return;
   
-  // Initialize values
+  // Initialize if they don't exist
   if (typeof user.tradesToday !== 'number') user.tradesToday = 0;
   if (typeof user.totalProfit !== 'number') user.totalProfit = 0;
-  if (typeof user.currentMultiplier !== 'number') user.currentMultiplier = 1;
 
-  const tradeProfit = Number(profit);
+  // Increment counts
   user.tradesToday += 1;
-  user.totalProfit = Number((user.totalProfit + tradeProfit).toFixed(2));
+  const tradeProfit = Number(profit);
+  user.totalProfit += tradeProfit;
 
   // --- MARTINGALE LOGIC ---
   if (tradeProfit < 0) {
-    // LOSS: Increase multiplier by 2.5x
-    user.currentMultiplier = Number((user.currentMultiplier * 2.5).toFixed(2)); 
+    // LOSS: Increase multiplier to recover (2.5 is ideal for Over 5 payout)
+    currentMultiplier *= 2.5; 
+    console.log(`[RISK] Loss detected. Increasing multiplier to: ${currentMultiplier}`);
   } else {
     // WIN: Reset back to base stake
-    user.currentMultiplier = 1;
+    currentMultiplier = 1;
+    console.log(`[RISK] Win detected. Resetting multiplier.`);
   }
 
-  // SAVE TO SUPABASE: This ensures data survives a deploy/restart
-  await saveUserProgress(
-    user.userId, 
-    user.totalProfit, 
-    user.tradesToday, 
-    user.currentMultiplier
-  );
-
-  console.log(`[STATS] ${user.userId} | Profit: ${user.totalProfit} | Multiplier: ${user.currentMultiplier}x`);
+  console.log(`[STATS UPDATE] ${user.userId}: Trades Today: ${user.tradesToday} | Session Profit: ${user.totalProfit.toFixed(2)}`);
 }
 
 /**
- * STRICT ROUNDING: Ensures Deriv API never sees more than 2 decimal places
+ * Calculates the stake based on balance or user preference + Martingale
  */
 export function calculateStake(user = {}) {
   try {
     const balance = Number(user.currentBalance || 0);
-    const multiplier = Number(user.currentMultiplier || 1);
     
-    let base = (user.baseStake && Number(user.baseStake) > 0) 
-               ? Number(user.baseStake) 
-               : 2.0;
+    // 1. Determine the base starting stake
+    let base;
+    if (user.baseStake && Number(user.baseStake) > 0) {
+      base = Number(user.baseStake);
+    } else {
+      // Fallback: 1% of balance or 0.35 minimum
+      base = Math.max(0.35, +(balance * 0.01).toFixed(2));
+    }
 
-    // Strict 2-decimal rounding to fix "Invalid Price" errors
-    const rawStake = Math.floor(base * multiplier * 100) / 100;
+    // 2. Apply the Martingale multiplier
+    const rawStake = +(base * currentMultiplier).toFixed(2);
 
-    // Safety: Don't allow a stake higher than 50% of account balance
-    const safetyCap = Math.floor(balance * 0.5 * 100) / 100;
-    const safetyStake = Math.min(rawStake, safetyCap);
-    
+    // 3. Safety Check: Never stake more than the current balance
+    const safetyStake = Math.min(rawStake, balance * 0.5); // Cap at 50% balance per trade
+
+    // 4. Ensure it's not below the Deriv minimum (0.35)
     const finalStake = Math.max(0.35, safetyStake);
-    
-    return Number(finalStake.toFixed(2));
+
+    return finalStake;
   } catch (e) {
     console.error('[RISK] calculateStake error:', e.message);
-    return 0.35; 
+    return 0.35; // Absolute fallback
   }
 }
 
+/**
+ * Checks if the bot is allowed to trade based on balance and limits
+ */
 export function checkLimits(user = {}) {
   try {
     const balance = Number(user.currentBalance || 0);
-    const profit = Number(user.totalProfit || 0);
 
-    if (balance < 0.35) return 'LOW_BALANCE';
+    // Minimal balance required to trade
+    const minBalance = Number(user.minBalance) || 0.35;
+    if (balance < minBalance) {
+      console.log(`[LIMITS] user=${user.userId} result=LOW_BALANCE balance=${balance}`);
+      return 'LOW_BALANCE';
+    }
 
-    if (user.targetProfit && profit >= user.targetProfit) {
+    // Daily trades limit check
+    const maxPerDay = Number(user.maxTradesPerDay) || 100; 
+    const currentTrades = Number(user.tradesToday) || 0;
+
+    if (currentTrades >= maxPerDay) {
+      console.log(`[LIMITS] user=${user.userId} result=DAILY_LIMIT tradesToday=${currentTrades}`);
+      return 'DAILY_LIMIT';
+    }
+
+    // Stop-loss / Max Profit target check
+    if (user.targetProfit && user.totalProfit >= user.targetProfit) {
+        console.log(`[LIMITS] Target Profit Reached: ${user.totalProfit}`);
         return 'TARGET_REACHED';
     }
 
     return 'OK';
   } catch (e) {
+    console.error('[LIMITS] checkLimits error:', e.message);
     return 'ERROR';
   }
 }
